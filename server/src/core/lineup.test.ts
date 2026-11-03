@@ -153,19 +153,19 @@ describe('normalizeLineup', () => {
     };
     const result = normalizeLineup(raw, 2);
 
-    expect(result.host.name).toBe('林'.repeat(12));
-    expect(result.host.profession).toBe('主'.repeat(20));
-    expect(result.host.title).toBe('题'.repeat(30));
-    expect(result.host.stance).toBe('立'.repeat(80));
+    expect(result.host.name).toBe(`${'林'.repeat(11)}…`);
+    expect(result.host.profession).toBe(`${'主'.repeat(19)}…`);
+    expect(result.host.title).toBe(`${'题'.repeat(29)}…`);
+    expect(result.host.stance).toBe(`${'立'.repeat(79)}…`);
     expect(result.host.stanceTag).toBe('观点');
     expect(result.host.persona).toBe('');
     expect(result.experts[0]).toMatchObject({
-      name: '周'.repeat(12),
-      profession: '业'.repeat(20),
-      title: '职'.repeat(30),
-      stance: '观'.repeat(80),
-      stanceTag: '态'.repeat(6),
-      persona: '人'.repeat(200)
+      name: `${'周'.repeat(11)}…`,
+      profession: `${'业'.repeat(19)}…`,
+      title: `${'职'.repeat(29)}…`,
+      stance: `${'观'.repeat(79)}…`,
+      stanceTag: `${'态'.repeat(5)}…`,
+      persona: `${'人'.repeat(199)}…`
     });
     expect(result.experts[1]).toMatchObject({
       stanceTag: '观点',

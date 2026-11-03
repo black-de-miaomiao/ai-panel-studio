@@ -10,6 +10,11 @@ export type LLMTier = 'quality' | 'fast';
 
 export type LLMThinking = 'disabled' | 'low' | 'high';
 
+export interface LLMUsage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
 export interface LLMRequest {
   task: LLMTask;
   system: string;
@@ -21,11 +26,7 @@ export interface LLMRequest {
   context?: unknown;
   signal?: AbortSignal;
   discussionId?: string;
-}
-
-export interface LLMUsage {
-  promptTokens: number;
-  completionTokens: number;
+  onUsage?: (usage: LLMUsage) => void;
 }
 
 export interface LLMProvider {

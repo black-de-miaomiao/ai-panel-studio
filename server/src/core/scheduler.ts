@@ -38,8 +38,110 @@ export interface SpeakerPick {
   score: number;
 }
 
+interface Candidate {
+  bid: NormalizedBid;
+  score: number;
+}
+
 export function selectNextSpeaker(
-  _input: SchedulerInput
+  input: SchedulerInput
 ): SpeakerPick | null {
-  throw new Error('NOT_IMPLEMENTED');
+  const bidsByParticipant = new Map<string, NormalizedBid>();
+  for (const bid of input.bids) {
+    if (bid.participantId && !bidsByParticipant.has(bid.participantId)) {
+      bidsByParticipant.set(bid.participantId, bid);
+    }
+  }
+
+  const candidates: NormalizedBid[] = [...bidsByParticipant.values()].filter(
+    (bid) =>
+      bid.wantToSpeak &&
+      (input.lastSpeakerId === null ||
+        bid.participantId !== input.lastSpeakerId)
+  );
+
+  const addressedId = input.addressedParticipantId;
+  if (addressedId) {
+    const addressedBid = bidsByParticipant.get(addressedId);
+    if (
+      !addressedBid?.wantToSpeak &&
+      (input.lastSpeakerId === null || addressedId !== input.lastSpeakerId)
+    ) {
+      candidates.push({
+        participantId: addressedId,
+        wantToSpeak: true,
+        intent: 'raise_hand',
+        urgency: 0.5,
+        replyToParticipantId: null,
+        focus: null
+      });
+    }
+  }
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const candidateScores: Candidate[] = candidates.map((bid) => {
+    const participantId = bid.participantId;
+    if (!participantId) {
+      return { bid, score: Number.NEGATIVE_INFINITY };
+    }
+
+    const urgency = Math.min(1, Math.max(0, bid.urgency));
+    let score = urgency + SCHEDULER_WEIGHTS.intent[bid.intent];
+    if (
+      input.lastSpeakerId !== null &&
+      bid.replyToParticipantId === input.lastSpeakerId
+    ) {
+      score += SCHEDULER_WEIGHTS.directReply;
+    }
+    if (bid.intent === 'interrupt' && urgency >= 0.8) {
+      score += SCHEDULER_WEIGHTS.interruptBonus;
+    }
+    if (input.recentExpertSpeakerIds.includes(participantId)) {
+      score -= SCHEDULER_WEIGHTS.recentExpertSpeakerPenalty;
+    }
+
+    const previousTurn = input.lastSpokeTurn[participantId];
+    if (
+      previousTurn === undefined ||
+      input.turnIndex - previousTurn >= 4
+    ) {
+      score += SCHEDULER_WEIGHTS.fairnessBonus;
+    }
+    if (participantId === addressedId) {
+      score += SCHEDULER_WEIGHTS.addressedBonus;
+    }
+    score += input.rng() * SCHEDULER_WEIGHTS.randomJitter;
+    return { bid, score };
+  });
+
+  candidateScores.sort((left, right) => {
+    if (right.score !== left.score) {
+      return right.score - left.score;
+    }
+    if (right.bid.urgency !== left.bid.urgency) {
+      return right.bid.urgency - left.bid.urgency;
+    }
+    const leftSeat =
+      input.seatByParticipantId[left.bid.participantId ?? ''] ??
+      Number.POSITIVE_INFINITY;
+    const rightSeat =
+      input.seatByParticipantId[right.bid.participantId ?? ''] ??
+      Number.POSITIVE_INFINITY;
+    return leftSeat - rightSeat;
+  });
+
+  const winner = candidateScores[0];
+  const participantId = winner?.bid.participantId;
+  if (!winner || !participantId) {
+    return null;
+  }
+  return {
+    participantId,
+    intent: winner.bid.intent,
+    replyToParticipantId: winner.bid.replyToParticipantId,
+    score: winner.score
+  };
 }

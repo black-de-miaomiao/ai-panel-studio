@@ -221,7 +221,7 @@ stateDiagram-v2
 ### A. 阵容规范化 `normalizeLineup(raw, expertCount)`
 
 - **输入：** 模型 JSON `{ host: { name, profession, title, stance, stanceTag?, persona? }, experts: [同结构] }`。
-- 所有字符串字段先修剪，再按以下上限截断：`name` 12 字、`profession` 20 字、`title` 30 字、`stance` 80 字、`stanceTag` 6 字、`persona` 200 字。
+- 所有字符串字段先修剪，再按以下上限截断（超长时保留前“上限 − 1”个字并以「…」结尾）：`name` 12 字、`profession` 20 字、`title` 30 字、`stance` 80 字、`stanceTag` 6 字、`persona` 200 字。
 - 缺少 `stanceTag` 时填「观点」；缺少 `persona` 时填空串。
 - `host` 缺失，或主持人/任一保留专家的必填字段 `name`、`profession`、`title`、`stance` 为空：抛 `LineupValidationError('INVALID_FORMAT')`。
 - 专家多于 N 名时取前 N 名；少于 N 名时抛 `INSUFFICIENT_EXPERTS`。
@@ -319,8 +319,8 @@ stateDiagram-v2
 ```
 
 - **上下文 `ctx`：** `discussionId`、`aliasToParticipantId`（仅专家别名）、`refToInsightId`（`C1..`/`D1..` 到已有洞察 ID）、`validSeqs`、`currentSeq`、`now`、`newId()`、`maxPerKind`（6）、`similarityThreshold`（0.6）。
-- ① `content` 修剪并截断到 80 字；空内容丢弃。
-- ② 别名映射到专家 ID；未知别名和主持人 `H` 丢弃。共识去重后少于 2 名专家、分歧少于 2 名专家时丢弃。立场 `position` 截断到 40 字；共识缺少立场时记为「认同」。
+- ① `content` 修剪；超过 80 字时截断并以「…」结尾；空内容丢弃。
+- ② 别名映射到专家 ID；未知别名和主持人 `H` 丢弃。共识去重后少于 2 名专家、分歧少于 2 名专家时丢弃。立场 `position` 超过 40 字时截断并以「…」结尾；共识缺少立场时记为「认同」。
 - ③ `evidence` 只保留 `validSeqs` 中的发言序号，去重并升序；结果为空则丢弃（无证据不入库）。
 - ④ `ref` 命中同类已有条目时更新：`content` 覆盖、`stances` 按 `participantId` 合并（新值覆盖旧值，旧值保留）、`evidence` 合并去重、`updatedAtSeq = currentSeq`、`updatedAt = now`。分歧 `resolved=true` 时将 `status` 设为 `resolved`。
 - ⑤ 无 `ref` 或 `ref` 未命中时，与同类已有条目计算相似度：去掉标点与空白后的字符二元组 Jaccard。相似度 ≥ 阈值则按④更新该条，否则新建，状态为 `active`。
@@ -459,7 +459,7 @@ interface LLMProvider {
 
 ### 7.1 上下文构建原则
 
-- 每次 LLM 调用无状态，不累积多轮 messages。代码从数据库重建精简上下文：角色卡、话题、阵容别名表、当前共识/分歧、最近 10 条发言和本次任务指令。
+- 每次 LLM 调用无状态，不累积多轮 messages。代码从数据库重建精简上下文：角色卡、话题、阵容名册（别名、姓名、身份与立场标签，例如 `E2 陈澄｜用户研究负责人｜立场：审慎`）、当前共识/分歧、最近 10 条发言和本次任务指令。出价任务还由代码给出上一条发言人及其立场、与本人立场是否相同；洞察任务同时提供最近发言窗口，evidence 可以引用其中任意真实 seq（以 §5.E ③ 的 `validSeqs` 为准）。
 - 上下文长度与讨论总长度无关；不同讨论不会共享对话上下文。
 - 使用 `H`、`E1..En`、`C1..`、`D1..` 代替 UUID。模型不接触内部 ID，别名到数据库 ID 的映射与校验由代码负责。
 - JSON 任务启用 `json_object` 模式并做 zod 校验；失败重试 1 次，再按任务规定采用兜底行为（例如出价规范化的默认值、阵容最终失败转为 `failed`/`502 LLM_ERROR`，洞察失败留待下次触发）。
