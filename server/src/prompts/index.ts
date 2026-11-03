@@ -433,7 +433,7 @@ export function buildBidPrompt(input: BidPromptInput): PromptParts {
     instruction:
       '结合上一条发言与立场关系判断是否有真实新内容；无内容时不要发言。'
   };
-  const system = `你是中文圆桌讨论中的专家出价器。只根据角色卡、话题、共识分歧和最近发言判断，不补造 transcript 中没有的观点。意图只能是 raise_hand、interrupt、supplement 或 rebut。立场不同且能指出对方具体漏洞时优先 rebut；rebut 必须指出真实漏洞，supplement 必须补充新条件或关键例子。urgency 刻度：0.85–1.00 用于被点名，或对方观点与你的核心立场直接冲突且你有具体反驳；0.60–0.80 用于有明确反驳点或关键补充；0.30–0.55 用于一般补充。主持人已点名当前专家时必须 wantToSpeak=true 且 urgency 至少 0.85；没有真实新内容时 wantToSpeak=false。同一轮通常只有一两位专家有强烈发言欲望；刚发过言，或只想重复同类观点时不要发言。interrupt 仅用于需要立即打断的强烈冲突，urgency 至少 0.85。focus 是公开关注点，不是推理过程，最多20字。
+  const system = `你是中文圆桌讨论中的专家出价器。只根据角色卡、话题、共识分歧和最近发言判断，不补造 transcript 中没有的观点。意图只能是 raise_hand、interrupt、supplement 或 rebut。立场不同且能指出对方具体漏洞时优先 rebut；rebut 必须指出真实漏洞，supplement 必须补充新条件或关键例子。urgency 刻度：0.85–1.00 用于被点名，或对方观点与你的核心立场直接冲突且你有具体反驳；0.60–0.80 用于有明确反驳点或关键补充；0.30–0.55 用于一般补充。主持人已点名当前专家时必须 wantToSpeak=true 且 urgency 至少 0.85；没有真实新内容时 wantToSpeak=false。同一轮通常只有一两位专家有强烈发言欲望；刚发过言，或只想重复同类观点时不要发言。interrupt 仅用于对方刚说完、其观点与你的核心立场直接冲突且你迫切需要当场回应时；只有确实无法接受时才抢答，urgency 至少 0.85，整场中偶尔出现而非常态。focus 是公开关注点，不是推理过程，最多20字。
 只输出 JSON，字段必须完整且严格为：{"wantToSpeak":布尔值,"intent":"raise_hand|interrupt|supplement|rebut","urgency":0到1之间的数字,"replyTo":"H或E1..En或null","focus":"最多20字的字符串或null"}。不得输出思维过程、额外字段或 Markdown。`;
   const user = `话题：${topicBlock(base.topic)}
 当前专家别名：${safeText(input.speakerAlias)}
@@ -645,8 +645,11 @@ ${utteranceText || '（没有新增发言）'}
 export function buildSummaryPrompt(
   input: DiscussionPromptInput
 ): PromptParts {
-  const context = discussionContext(input);
-  const system = `你是中文圆桌节目的主持人。根据话题、洞察区和最近真实发言，写3至5段自然、口语化的主持人收尾。回顾讨论走向，点名主要观点和专家姓名，指出最关键的交锋，留下开放问题并致谢。共识与分歧以洞察区为准；洞察区没有的内容，不要说成“大家都同意”或“已形成共识”，可以表述为某位专家的观点或尚待讨论的问题。不要写“目前尚无已确认的共识”这类说明性语句。只陈述上下文支持的内容，不虚构数字、报告或机构。
+  const context = {
+    ...discussionContext(input),
+    transcriptWindow: summaryTranscriptWindow(input.transcriptWindow)
+  };
+  const system = `你是中文圆桌节目的主持人。根据话题、洞察区和全程真实发言，写3至4段自然、口语化的主持人收尾。回顾讨论走向，点名主要观点和专家姓名，指出最关键的交锋，留下开放问题并致谢。共识与分歧以洞察区为准；洞察区没有的内容，不要说成“大家都同意”或“已形成共识”，可以表述为某位专家的观点或尚待讨论的问题。只引用发言记录中真实出现的内容；对未在发言记录中发言的嘉宾，不得写成“提到”“认为”“指出”等归属，可以把问题留给该嘉宾。只有洞察区明确存在共识条目时，才能使用“双方都承认”“大家都同意”或同义的共识表述；角色卡中的立场不代表实际发言。不要写“目前尚无已确认的共识”这类说明性语句。只陈述上下文支持的内容，不虚构数字、报告或机构。
 严禁输出 JSON、列表、表格、Markdown 标题、代码块或姓名前缀。段落之间空一行。`;
   const user = `话题：${topicBlock(context.topic)}
 阵容名册：
@@ -654,12 +657,22 @@ ${context.rosterText}
 当前共识与分歧：
 ${context.insightsText}
 别名表：${context.aliasTable.join('；')}；专家别名按 E1..En 对应阵容座位。
-最近发言（最多10条，按时间正序）：
+本场全部真实发言（最多40条；超出时保留开场与最近39条，按时间正序）：
 ${context.transcriptWindow}
-本次任务：以主持人口吻写3至5段自然语言，回顾走向、主要观点、关键交锋、开放问题并致谢；不得输出 JSON 或任何 Markdown 格式。`;
+本次任务：以主持人口吻写3至4段自然语言，回顾走向、主要观点、关键交锋、开放问题并致谢；不得输出 JSON 或任何 Markdown 格式。`;
   return makeParts(system, user, {
     ...context,
     instruction:
       '主持人回顾讨论走向、主要观点和关键交锋，留下开放问题并致谢；共识分歧以洞察区为准，不写说明性空话。'
   });
+}
+
+function summaryTranscriptWindow(value: string): string {
+  const lines = value
+    .split(/\r?\n/u)
+    .map((line) => safeText(line.trim()))
+    .filter(Boolean);
+  const selected =
+    lines.length > 40 ? [lines[0]!, ...lines.slice(-39)] : lines;
+  return selected.length > 0 ? selected.join('\n') : '（暂无发言记录）';
 }

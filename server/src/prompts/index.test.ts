@@ -151,7 +151,7 @@ describe('runtime prompt builders', () => {
   });
 
   it('讨论类提示词最多携带最近十条发言', () => {
-    const prompts = allPrompts().slice(1, 4).concat(allPrompts().slice(5));
+    const prompts = allPrompts().slice(1, 5);
 
     for (const prompt of prompts) {
       const context = prompt.context as {
@@ -212,6 +212,10 @@ describe('runtime prompt builders', () => {
     expect(bid?.system).toContain('0.85–1.00');
     expect(bid?.system).toContain('同一轮通常只有一两位专家');
     expect(bid?.system).toContain('优先 rebut');
+    expect(bid?.system).toContain('对方刚说完');
+    expect(bid?.system).toContain('核心立场直接冲突');
+    expect(bid?.system).toContain('整场中偶尔出现');
+    expect(bid?.system).toContain('只有确实无法接受时才抢答');
   });
 
   it('主持 bridge 给出双方姓名与立场且 invite 给出目标身份', () => {
@@ -311,6 +315,40 @@ describe('runtime prompt builders', () => {
     expect(prompt.system).toContain('严禁输出 JSON');
     expect(prompt.system).toContain('Markdown');
     expect(prompt.user).toContain('不得输出 JSON');
+  });
+
+  it('总结上下文保留开场与全程最近39条，最多40条', () => {
+    const fullTranscript = Array.from(
+      { length: 45 },
+      (_, index) =>
+        `#${index + 1} E1 周明（工程教育顾问）：第${index + 1}条全程发言。`
+    ).join('\n');
+    const prompt = buildSummaryPrompt({
+      ...discussion,
+      transcriptWindow: fullTranscript
+    });
+    const context = prompt.context as { transcriptWindow: string };
+    const lines = context.transcriptWindow.split('\n');
+
+    expect(lines).toHaveLength(40);
+    expect(lines[0]).toContain('#1 E1 周明');
+    expect(lines[1]).toContain('#7 E1 周明');
+    expect(lines.at(-1)).toContain('#45 E1 周明');
+    expect(context.transcriptWindow).not.toContain('#2 E1 周明');
+    expect(prompt.user).toContain(
+      '本场全部真实发言（最多40条；超出时保留开场与最近39条'
+    );
+  });
+
+  it('总结只能把 transcript 中实际发言归属给嘉宾，共识表述限于洞察条目', () => {
+    const prompt = buildSummaryPrompt(discussion);
+
+    expect(prompt.system).toContain('只引用发言记录中真实出现的内容');
+    expect(prompt.system).toContain('不得写成“提到”“认为”“指出”');
+    expect(prompt.system).toContain('双方都承认');
+    expect(prompt.system).toContain(
+      '才能使用“双方都承认”“大家都同意”或同义的共识表述'
+    );
   });
 
   it('发言提示词要求事实依据且总结不加入洞察区外的结论', () => {
