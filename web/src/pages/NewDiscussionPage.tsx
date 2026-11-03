@@ -9,17 +9,38 @@ import {
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
 import type { DiscussionSnapshot } from '@aps/shared';
-import { mockApi, MockApiError } from '../mocks/mockApi';
+import { ApiError } from '../api/httpApi';
+import { useDiscussionApi } from '../api/DiscussionApiContext';
 import { TopicForm } from '../components/lineup/TopicForm';
 import { LineupReview } from '../components/lineup/LineupReview';
 import { LineupSkeleton } from '../components/lineup/LineupSkeleton';
 import { Button } from '../components/ui/Button';
 
+type RetryOperation = 'regenerate' | 'start';
+
+function errorMessage(caught: unknown, fallback: string): string {
+  return caught instanceof Error && caught.message
+    ? caught.message
+    : fallback;
+}
+
+function failedDiscussionId(caught: unknown): string | null {
+  if (!(caught instanceof ApiError) || caught.code !== 'LLM_ERROR') return null;
+  const detail = caught.details[0];
+  if (!detail || typeof detail !== 'object') return null;
+  const id = (detail as { discussionId?: unknown }).discussionId;
+  return typeof id === 'string' ? id : null;
+}
+
 export default function NewDiscussionPage() {
+  const api = useDiscussionApi();
   const navigate = useNavigate();
   const [snapshot, setSnapshot] = useState<DiscussionSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [retryOperation, setRetryOperation] =
+    useState<RetryOperation>('regenerate');
+  const [failedId, setFailedId] = useState<string | null>(null);
   const [lastRequest, setLastRequest] = useState<{
     topic: string;
     expertCount: number;
@@ -28,16 +49,30 @@ export default function NewDiscussionPage() {
   const generate = async (topic: string, expertCount: number) => {
     setBusy(true);
     setError(null);
+    setRetryOperation('regenerate');
     setLastRequest({ topic, expertCount });
     try {
-      const created = await mockApi.createDiscussion({ topic, expertCount });
+      const created = failedId
+        ? await api.regenerateLineup(failedId)
+        : await api.createDiscussion({ topic, expertCount });
       setSnapshot(created);
+      setFailedId(null);
     } catch (caught) {
-      setError(
-        caught instanceof MockApiError
-          ? caught.message
-          : '暂时无法生成嘉宾阵容，请稍后重试。'
-      );
+      setError(errorMessage(caught, '暂时无法生成嘉宾阵容，请稍后重试。'));
+      const discussionId = failedDiscussionId(caught);
+      if (discussionId) {
+        setFailedId(discussionId);
+        try {
+          setSnapshot(await api.getDiscussion(discussionId));
+        } catch (loadError) {
+          setError(
+            errorMessage(
+              loadError,
+              '暂时无法载入失败的讨论，请稍后重试。'
+            )
+          );
+        }
+      }
     } finally {
       setBusy(false);
     }
@@ -47,15 +82,13 @@ export default function NewDiscussionPage() {
     if (!snapshot) return;
     setBusy(true);
     setError(null);
+    setRetryOperation('regenerate');
     try {
-      const updated = await mockApi.regenerateLineup(snapshot.discussion.id);
+      const updated = await api.regenerateLineup(snapshot.discussion.id);
       setSnapshot(updated);
+      setFailedId(null);
     } catch (caught) {
-      setError(
-        caught instanceof MockApiError
-          ? caught.message
-          : '暂时无法更换阵容，请稍后重试。'
-      );
+      setError(errorMessage(caught, '暂时无法更换阵容，请稍后重试。'));
     } finally {
       setBusy(false);
     }
@@ -64,15 +97,14 @@ export default function NewDiscussionPage() {
   const confirmLineup = async () => {
     if (!snapshot) return;
     setBusy(true);
+    setError(null);
     try {
-      await mockApi.start(snapshot.discussion.id);
+      await api.start(snapshot.discussion.id);
       navigate(`/studio/${snapshot.discussion.id}`);
     } catch (caught) {
-      setError(
-        caught instanceof MockApiError
-          ? caught.message
-          : '暂时无法进入演播厅，请稍后重试。'
-      );
+      setError(errorMessage(caught, '暂时无法进入演播厅，请稍后重试。'));
+      setRetryOperation('start');
+    } finally {
       setBusy(false);
     }
   };
@@ -132,6 +164,22 @@ export default function NewDiscussionPage() {
                     initialExpertCount={lastRequest?.expertCount}
                     onSubmit={(topic, expertCount) => void generate(topic, expertCount)}
                   />
+                  {!snapshot && error && lastRequest && !busy ? (
+                    <div className="new-page__retry">
+                      <Button
+                        onClick={() =>
+                          void generate(
+                            lastRequest.topic,
+                            lastRequest.expertCount
+                          )
+                        }
+                        size="sm"
+                        variant="secondary"
+                      >
+                        重试
+                      </Button>
+                    </div>
+                  ) : null}
                   {busy ? (
                     <div className="new-form-card__generating" role="status">
                       <span className="generating-spark"><Sparkles size={15} /></span>
@@ -183,9 +231,18 @@ export default function NewDiscussionPage() {
               onBack={() => {
                 setSnapshot(null);
                 setError(null);
+                setFailedId(null);
               }}
               onConfirm={() => void confirmLineup()}
               onRegenerate={() => void regenerate()}
+              onRetry={
+                retryOperation === 'start'
+                  ? () => void confirmLineup()
+                  : () => void regenerate()
+              }
+              retryLabel={
+                retryOperation === 'start' ? '重试进入演播厅' : '重试生成'
+              }
               snapshot={snapshot}
             />
           )}

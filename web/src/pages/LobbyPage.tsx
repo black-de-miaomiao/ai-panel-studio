@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   Clapperboard,
@@ -10,10 +10,11 @@ import {
 import { Link, useSearchParams } from 'react-router';
 import {
   LOBBY_GROUPS,
+  STATUS_PRIORITY,
   type DiscussionListItem,
   type LobbyGroupKey
 } from '@aps/shared';
-import { mockApi } from '../mocks/mockApi';
+import { useDiscussionApi } from '../api/DiscussionApiContext';
 import { DiscussionCard } from '../components/lobby/DiscussionCard';
 import { LobbyGroupTabs } from '../components/lobby/LobbyGroupTabs';
 import { Button } from '../components/ui/Button';
@@ -26,6 +27,7 @@ function isLobbyGroupKey(value: string | null): value is LobbyGroupKey {
 }
 
 export default function LobbyPage() {
+  const api = useDiscussionApi();
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get('tab');
   const [activeKey, setActiveKey] = useState<LobbyGroupKey>(
@@ -33,38 +35,83 @@ export default function LobbyPage() {
   );
   const [items, setItems] = useState<DiscussionListItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [retryVersion, setRetryVersion] = useState(0);
+  const hasLoaded = useRef(false);
+  const hasInitializedTab = useRef(false);
+  const requestedTabRef = useRef(requestedTab);
+  requestedTabRef.current = requestedTab;
+  const setSearchParamsRef = useRef(setSearchParams);
+  setSearchParamsRef.current = setSearchParams;
 
   useEffect(() => {
     let active = true;
-    void mockApi
-      .listDiscussions()
-      .then((discussions) => {
+    let inFlight = false;
+
+    const load = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      if (!hasLoaded.current) setLoading(true);
+      try {
+        const discussions = await api.listDiscussions();
         if (!active) return;
-        setItems(discussions);
-        const defaultGroup = LOBBY_GROUPS.find((group) =>
-          discussions.some((discussion) =>
-            (group.statuses as readonly DiscussionListItem['status'][]).includes(
-              discussion.status
+        const sorted = [...discussions].sort((left, right) => {
+          const priority =
+            STATUS_PRIORITY[right.status] - STATUS_PRIORITY[left.status];
+          return priority || right.updatedAt.localeCompare(left.updatedAt);
+        });
+        setItems(sorted);
+        setError(null);
+        hasLoaded.current = true;
+
+        if (!hasInitializedTab.current) {
+          hasInitializedTab.current = true;
+          const defaultGroup = LOBBY_GROUPS.find((group) =>
+            sorted.some((discussion) =>
+              (
+                group.statuses as readonly DiscussionListItem['status'][]
+              ).includes(discussion.status)
             )
-          )
+          );
+          const currentRequestedTab = requestedTabRef.current;
+          const initialKey = isLobbyGroupKey(currentRequestedTab)
+            ? currentRequestedTab
+            : (defaultGroup?.key ?? DEFAULT_TAB);
+          setActiveKey(initialKey);
+          setSearchParamsRef.current((current) => {
+            const next = new URLSearchParams(current);
+            next.set('tab', initialKey);
+            return next;
+          }, { replace: true });
+        }
+      } catch (caught) {
+        if (!active) return;
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : '暂时无法载入讨论，请稍后重试。'
         );
-        const initialKey = isLobbyGroupKey(requestedTab)
-          ? requestedTab
-          : (defaultGroup?.key ?? DEFAULT_TAB);
-        setActiveKey(initialKey);
-        setSearchParams((current) => {
-          const next = new URLSearchParams(current);
-          next.set('tab', initialKey);
-          return next;
-        }, { replace: true });
-      })
-      .finally(() => {
+      } finally {
+        inFlight = false;
         if (active) setLoading(false);
-      });
+      }
+    };
+
+    void load();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load();
+    }, 5_000);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+
     return () => {
       active = false;
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
     };
-  }, [requestedTab, setSearchParams]);
+  }, [api, retryVersion]);
 
   useEffect(() => {
     if (isLobbyGroupKey(requestedTab) && requestedTab !== activeKey) {
@@ -201,13 +248,44 @@ export default function LobbyPage() {
               <span className="skeleton skeleton--card" />
             </div>
           ) : visibleItems.length ? (
-            <div className="discussion-grid">
-              {visibleItems.map((discussion) => (
-                <DiscussionCard
-                  discussion={discussion}
-                  key={discussion.id}
-                />
-              ))}
+            <>
+              {error ? (
+                <div className="lobby-refresh-error" role="alert">
+                  <span>{error}</span>
+                  <Button
+                    onClick={() => setRetryVersion((version) => version + 1)}
+                    size="sm"
+                    variant="secondary"
+                  >
+                    重试
+                  </Button>
+                </div>
+              ) : null}
+              <div className="discussion-grid">
+                {visibleItems.map((discussion) => (
+                  <DiscussionCard
+                    discussion={discussion}
+                    key={discussion.id}
+                  />
+                ))}
+              </div>
+            </>
+          ) : error ? (
+            <div className="lobby-load-error" role="alert">
+              <EmptyState
+                title="暂时无法载入讨论"
+                description={error}
+                icon={<Radio size={21} />}
+                action={
+                  <Button
+                    onClick={() => setRetryVersion((version) => version + 1)}
+                    size="sm"
+                    variant="secondary"
+                  >
+                    重试
+                  </Button>
+                }
+              />
             </div>
           ) : (
             <EmptyState

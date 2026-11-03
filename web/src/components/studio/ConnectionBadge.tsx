@@ -3,7 +3,8 @@ import type { ConnectionStatus } from '../../state/eventSource';
 const LABELS: Record<ConnectionStatus, string> = {
   connecting: '正在连接',
   open: '连接正常',
-  reconnecting: '正在重连'
+  reconnecting: '正在重连',
+  closed: '连接已关闭'
 };
 
 interface ConnectionBadgeProps {

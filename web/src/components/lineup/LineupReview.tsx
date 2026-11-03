@@ -9,6 +9,8 @@ interface LineupReviewProps {
   busy?: boolean;
   error?: string | null;
   onRegenerate: () => void;
+  onRetry?: () => void;
+  retryLabel?: string;
   onConfirm: () => void;
   onBack: () => void;
 }
@@ -18,6 +20,8 @@ export function LineupReview({
   busy = false,
   error,
   onRegenerate,
+  onRetry,
+  retryLabel = '重试生成',
   onConfirm,
   onBack
 }: LineupReviewProps) {
@@ -54,11 +58,16 @@ export function LineupReview({
             换一批
           </Button>
           <Button
-            disabled={busy || !host || guests.length !== snapshot.discussion.expertCount}
             icon={<Check size={16} />}
             onClick={onConfirm}
             type="button"
             variant="primary"
+            disabled={
+              busy ||
+              snapshot.discussion.status !== 'lineup_ready' ||
+              !host ||
+              guests.length !== snapshot.discussion.expertCount
+            }
           >
             确认阵容，进入演播厅
           </Button>
@@ -71,11 +80,11 @@ export function LineupReview({
           <Button
             disabled={busy}
             icon={<RefreshCw size={14} />}
-            onClick={onRegenerate}
+            onClick={onRetry ?? onRegenerate}
             size="sm"
             type="button"
           >
-            重试生成
+            {retryLabel}
           </Button>
         </div>
       ) : null}

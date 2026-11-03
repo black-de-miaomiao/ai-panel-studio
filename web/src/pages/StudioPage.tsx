@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react';
 import { ArrowLeft, Clapperboard, LoaderCircle } from 'lucide-react';
 import {
   type DiscussionSnapshot,
@@ -6,7 +12,8 @@ import {
   type StreamEvent
 } from '@aps/shared';
 import { Link, useNavigate, useSearchParams } from 'react-router';
-import { mockApi, MockApiError } from '../mocks/mockApi';
+import { ApiError } from '../api/httpApi';
+import { useDiscussionApi } from '../api/DiscussionApiContext';
 import { createDemoSnapshot } from '../mocks/fixtures';
 import {
   createMockScript,
@@ -14,7 +21,8 @@ import {
 } from '../mocks/mockScript';
 import { MockEventSource } from '../mocks/mockEventSource';
 import { useDiscussion } from '../state/useDiscussion';
-import type { ConnectionStatus } from '../state/eventSource';
+import type { DiscussionEventSource } from '../state/eventSource';
+import { SseDiscussionEventSource } from '../state/sseEventSource';
 import { StudioHeader } from '../components/studio/StudioHeader';
 import { StageArena } from '../components/studio/StageArena';
 import { OnAirCaption } from '../components/studio/OnAirCaption';
@@ -23,9 +31,18 @@ import { TranscriptPanel } from '../components/studio/TranscriptPanel';
 import { InsightsPanel } from '../components/studio/InsightsPanel';
 import { SummaryPanel } from '../components/studio/SummaryPanel';
 import { Tabs } from '../components/ui/Tabs';
+import { Button } from '../components/ui/Button';
 
 interface StudioPageProps {
   id: string;
+}
+
+type ControlOperation = 'start' | 'pause' | 'resume' | 'end';
+
+function errorMessage(caught: unknown, fallback: string): string {
+  return caught instanceof Error && caught.message
+    ? caught.message
+    : fallback;
 }
 
 function makeStatusEvent(
@@ -45,106 +62,145 @@ function makeStatusEvent(
 function StudioSession({
   snapshot,
   eventSource,
-  demoMode
+  demoMode,
+  onSnapshot
 }: {
   snapshot: DiscussionSnapshot;
-  eventSource: MockEventSource;
+  eventSource: DiscussionEventSource;
   demoMode: boolean;
+  onSnapshot: (snapshot: DiscussionSnapshot) => void;
 }) {
+  const api = useDiscussionApi();
   const navigate = useNavigate();
-  const { state, connection, dispatchEvent } = useDiscussion(
+  const [mobileTab, setMobileTab] = useState('transcript');
+  const [requestBusy, setRequestBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [retryAction, setRetryAction] = useState<(() => void) | null>(null);
+  const [discussionDeleted, setDiscussionDeleted] = useState(false);
+  const { state, connection, dispatchEvent, patchDiscussion } = useDiscussion(
     snapshot,
     eventSource,
-    true
+    !discussionDeleted
   );
-  const [mobileTab, setMobileTab] = useState('transcript');
   const stateRef = useRef(state);
+  const redirectTimer = useRef<number | null>(null);
+
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
 
-  const dispatchStatus = (status: DiscussionStatus, eventSeq?: number) => {
-    dispatchEvent(makeStatusEvent(stateRef.current, status), eventSeq);
-  };
+  useEffect(
+    () => () => {
+      if (redirectTimer.current !== null) {
+        window.clearTimeout(redirectTimer.current);
+      }
+    },
+    []
+  );
 
-  const onStart = async () => {
-    if (!demoMode) {
-      try {
-        await mockApi.start(snapshot.discussion.id);
-      } catch {
-        // The reducer remains authoritative for the mock-only local control.
-      }
+  const markDiscussionDeleted = useCallback(() => {
+    setDiscussionDeleted(true);
+    setError('这场讨论已被删除，即将返回演播大厅。');
+    setRetryAction(null);
+    if (redirectTimer.current === null) {
+      redirectTimer.current = window.setTimeout(() => navigate('/'), 1_500);
     }
-    dispatchStatus('live', stateRef.current.lastEventSeq + 1);
-  };
-  const onPause = async () => {
-    if (!demoMode) {
-      try {
-        await mockApi.pause(snapshot.discussion.id);
-      } catch {
-        // A local preview still allows controls when mock data is read-only.
+  }, [navigate]);
+
+  useEffect(() => {
+    if (demoMode || connection !== 'closed' || discussionDeleted) return;
+    let active = true;
+    void api.getDiscussion(snapshot.discussion.id).catch((caught: unknown) => {
+      if (
+        active &&
+        caught instanceof ApiError &&
+        caught.code === 'NOT_FOUND'
+      ) {
+        markDiscussionDeleted();
       }
-    }
-    dispatchStatus('paused', stateRef.current.lastEventSeq + 1);
-  };
-  const onResume = async () => {
-    if (!demoMode) {
-      try {
-        await mockApi.resume(snapshot.discussion.id);
-      } catch {
-        // A local preview still allows controls when mock data is read-only.
-      }
-    }
-    dispatchStatus('live', stateRef.current.lastEventSeq + 1);
-  };
-  const onEnd = async () => {
-    if (!demoMode) {
-      try {
-        await mockApi.end(snapshot.discussion.id);
-      } catch {
-        // The UI keeps its mock-only transition deterministic.
-      }
-    }
+    });
+    return () => {
+      active = false;
+    };
+  }, [
+    api,
+    connection,
+    demoMode,
+    discussionDeleted,
+    markDiscussionDeleted,
+    snapshot.discussion.id
+  ]);
+
+  const dispatchStatus = (status: DiscussionStatus) => {
     const current = stateRef.current;
     dispatchEvent(
-      {
-        type: 'discussion.status',
-        discussionId: current.discussion.id,
-        at: new Date().toISOString(),
-        status: 'summarizing',
-        turnCount: current.discussion.turnCount,
-        maxTurns: current.discussion.maxTurns
-      },
+      makeStatusEvent(current, status),
       current.lastEventSeq + 1
     );
+  };
 
-    if (demoMode) return;
-    window.setTimeout(() => {
-      const latest = stateRef.current;
-      const summary = [
-        '本场讨论围绕用户提出的问题展开，专家从服务效率、实际边界与用户体验几个角度进行了交流。',
-        '嘉宾认同，应先从范围清晰、答案可核验的问题开始，并为用户保留明确的人工支持。',
-        '复杂问题的自动化边界仍需结合实际服务流程验证。下一步可以从小范围试点开始，持续观察用户反馈。'
-      ].join('\n\n');
-      try {
-        mockApi.completeSummary(latest.discussion.id, summary);
-      } catch {
-        // A route opened from the static seed fixture has no mutable record.
+  const runControl = async (operation: ControlOperation): Promise<void> => {
+    if (requestBusy) return;
+    setRequestBusy(true);
+    setError(null);
+    setRetryAction(null);
+    try {
+      if (demoMode) {
+        if (operation === 'start') dispatchStatus('live');
+        if (operation === 'pause') dispatchStatus('paused');
+        if (operation === 'resume') dispatchStatus('live');
+        if (operation === 'end') {
+          const current = stateRef.current;
+          dispatchEvent(
+            {
+              type: 'discussion.status',
+              discussionId: current.discussion.id,
+              at: new Date().toISOString(),
+              status: 'summarizing',
+              turnCount: current.discussion.turnCount,
+              maxTurns: current.discussion.maxTurns
+            },
+            current.lastEventSeq + 1
+          );
+        }
+        return;
       }
-      dispatchEvent(
-        {
-          type: 'summary.completed',
-          discussionId: latest.discussion.id,
-          at: new Date().toISOString(),
-          summary
-        },
-        latest.lastEventSeq + 1
-      );
-      dispatchEvent(
-        makeStatusEvent(latest, 'ended'),
-        latest.lastEventSeq + 2
-      );
-    }, 680);
+
+      const discussion = await api[operation](snapshot.discussion.id);
+      patchDiscussion(discussion);
+    } catch (caught) {
+      if (
+        !demoMode &&
+        caught instanceof ApiError &&
+        caught.code === 'INVALID_STATE'
+      ) {
+        try {
+          onSnapshot(await api.getDiscussion(snapshot.discussion.id));
+          setError('状态已变化，已刷新');
+        } catch (refreshError) {
+          if (
+            refreshError instanceof ApiError &&
+            refreshError.code === 'NOT_FOUND'
+          ) {
+            markDiscussionDeleted();
+          } else {
+            setError(
+              errorMessage(refreshError, '暂时无法刷新讨论状态，请稍后重试。')
+            );
+            setRetryAction(() => () => {
+              void runControl(operation);
+            });
+          }
+        }
+      } else {
+        setError(errorMessage(caught, '操作失败，请稍后重试。'));
+        setRetryAction(() => () => {
+          void runControl(operation);
+        });
+      }
+    } finally {
+      setRequestBusy(false);
+    }
   };
 
   const transcriptPanel = (
@@ -153,21 +209,37 @@ function StudioSession({
       utterances={state.utterances}
     />
   );
+  const visibleError = error ?? state.lastError;
 
   return (
     <main className="studio-page page-shell">
       <StudioHeader
+        busy={requestBusy}
         connection={connection}
+        demoMode={demoMode}
         onBack={() => navigate('/')}
-        onEnd={onEnd}
-        onPause={onPause}
-        onResume={onResume}
-        onStart={onStart}
+        onEnd={() => runControl('end')}
+        onPause={() => void runControl('pause')}
+        onResume={() => void runControl('resume')}
+        onStart={() => void runControl('start')}
         state={state}
       />
-      {state.lastError ? (
-        <div className="studio-error-banner" role="status">
-          {state.lastError}
+      {visibleError ? (
+        <div
+          className="studio-error-banner"
+          role={error ? 'alert' : 'status'}
+        >
+          <span>{visibleError}</span>
+          {retryAction ? (
+            <button
+              className="studio-error-banner__retry"
+              disabled={requestBusy}
+              onClick={() => retryAction()}
+              type="button"
+            >
+              重试
+            </button>
+          ) : null}
         </div>
       ) : null}
       <div
@@ -218,6 +290,7 @@ function StudioSession({
             className="studio-mobile-tabs"
             compact
           />
+
           <div
             aria-labelledby={mobileTab}
             className="studio-mobile-panel"
@@ -255,17 +328,12 @@ function StudioSession({
           </div>
         </section>
       </div>
-      {demoMode ? (
-        <div className="studio-demo-tag">
-          <span aria-hidden="true" />
-          DEMO REPLAY
-        </div>
-      ) : null}
     </main>
   );
 }
 
 export default function StudioPage({ id }: StudioPageProps) {
+  const api = useDiscussionApi();
   const [searchParams] = useSearchParams();
   const demoMode = id === 'demo';
   const baseSnapshot = useMemo(
@@ -293,65 +361,80 @@ export default function StudioPage({ id }: StudioPageProps) {
     [baseSnapshot, frameIndex, frames]
   );
   const demoEventSource = useMemo(
-    () =>
-      new MockEventSource(frames, speed, frameIndex),
+    () => new MockEventSource(frames, speed, frameIndex),
     [frameIndex, frames, speed]
   );
+  const emptyEventSource = useMemo(() => new MockEventSource([]), []);
   const [snapshot, setSnapshot] = useState<DiscussionSnapshot | null>(
     demoSnapshot
   );
   const [loading, setLoading] = useState(!demoMode);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<unknown>(null);
+
+  const loadSnapshot = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    setSnapshot(null);
+    try {
+      setSnapshot(await api.getDiscussion(id));
+    } catch (caught) {
+      setLoadError(caught);
+    } finally {
+      setLoading(false);
+    }
+  }, [api, id]);
 
   useEffect(() => {
     if (demoMode) {
       setSnapshot(demoSnapshot);
       setLoading(false);
-      setError(null);
+      setLoadError(null);
       return;
     }
-    let active = true;
-    setLoading(true);
-    void mockApi
-      .getDiscussion(id)
-      .then((nextSnapshot) => {
-        if (active) setSnapshot(nextSnapshot);
-      })
-      .catch((caught: unknown) => {
-        if (!active) return;
-        setError(
-          caught instanceof MockApiError
-            ? caught.message
-            : '暂时无法载入这场讨论。'
-        );
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [demoMode, demoSnapshot, id]);
+    void loadSnapshot();
+  }, [demoMode, demoSnapshot, loadSnapshot]);
 
-  const emptySource = useMemo(() => new MockEventSource([]), []);
+  const realEventSource = useMemo<DiscussionEventSource>(
+    () =>
+      snapshot && !demoMode
+        ? new SseDiscussionEventSource(
+            id,
+            snapshot.lastEventSeq
+          )
+        : emptyEventSource,
+    [demoMode, emptyEventSource, id, snapshot?.lastEventSeq]
+  );
 
   if (loading) {
     return (
       <main className="studio-loading page-shell" role="status">
         <LoaderCircle className="loading-spinner" size={22} />
-        <span>正在调试演播厅灯光…</span>
+        <span>正在载入演播厅…</span>
       </main>
     );
   }
 
   if (!snapshot) {
+    const notFound =
+      loadError instanceof ApiError && loadError.code === 'NOT_FOUND';
     return (
       <main className="studio-not-found page-shell">
         <span className="brand-lockup__mark">
           <Clapperboard size={18} />
         </span>
-        <h1>{error ?? '没有找到这场讨论'}</h1>
-        <p>这场演播厅可能已经离开节目单。</p>
+        <h1>
+          {notFound
+            ? '没有找到这场讨论'
+            : errorMessage(loadError, '暂时无法载入这场讨论。')}
+        </h1>
+        <p>
+          {notFound
+            ? '这场演播厅可能已经离开节目单。'
+            : '请确认后端已启动，然后重试。'}
+        </p>
+        <Button onClick={() => void loadSnapshot()} size="md" variant="secondary">
+          重试
+        </Button>
         <Link className="button button--secondary button--md" to="/">
           <ArrowLeft size={15} />
           返回演播大厅
@@ -363,8 +446,9 @@ export default function StudioPage({ id }: StudioPageProps) {
   return (
     <StudioSession
       demoMode={demoMode}
-      eventSource={demoMode ? demoEventSource : emptySource}
-      key={`${id}-${demoMode ? frameIndex : 'snapshot'}`}
+      eventSource={demoMode ? demoEventSource : realEventSource}
+      key={`${id}-${demoMode ? frameIndex : 'real'}`}
+      onSnapshot={setSnapshot}
       snapshot={snapshot}
     />
   );

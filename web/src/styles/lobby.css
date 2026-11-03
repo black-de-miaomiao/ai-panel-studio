@@ -580,3 +580,32 @@
   color: #9e916e;
 }
 
+.lobby-load-error {
+  border: 1px solid rgba(255, 159, 67, .14);
+  border-radius: 14px;
+  background: rgba(255, 159, 67, .025);
+}
+
+.lobby-load-error .empty-state p {
+  color: #ffc17e;
+}
+
+.lobby-refresh-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0 0;
+  padding: 8px 11px;
+  border: 1px solid rgba(255, 159, 67, .17);
+  border-radius: 10px;
+  background: rgba(38, 26, 16, .48);
+  color: #ffc17e;
+  font-size: 10px;
+}
+
+.new-page__retry {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 9px;
+}

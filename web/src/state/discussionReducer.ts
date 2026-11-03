@@ -1,5 +1,6 @@
 import {
   isDurableEvent,
+  type Discussion,
   type DiscussionSnapshot,
   type Insight,
   type Participant,
@@ -53,6 +54,23 @@ function replaceInsights(insights: Insight[]): Insight[] {
   }));
 }
 
+export function patchDiscussionState(
+  state: DiscussionState,
+  discussion: Discussion
+): DiscussionState {
+  if (discussion.id !== state.discussion.id) return state;
+  const currentUpdatedAt = Date.parse(state.discussion.updatedAt);
+  const nextUpdatedAt = Date.parse(discussion.updatedAt);
+  if (
+    Number.isFinite(currentUpdatedAt) &&
+    Number.isFinite(nextUpdatedAt) &&
+    nextUpdatedAt < currentUpdatedAt
+  ) {
+    return state;
+  }
+  return { ...state, discussion: { ...discussion } };
+}
+
 export function reduce(
   state: DiscussionState,
   event: StreamEvent,
@@ -78,7 +96,8 @@ export function reduce(
           ...state.discussion,
           status: event.status,
           turnCount: event.turnCount,
-          maxTurns: event.maxTurns
+          maxTurns: event.maxTurns,
+          updatedAt: event.at
         }
       };
     case 'lineup.updated':

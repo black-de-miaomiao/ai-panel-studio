@@ -1,19 +1,26 @@
 import { useCallback, useEffect, useReducer, useState } from 'react';
-import type { DiscussionSnapshot, StreamEvent } from '@aps/shared';
+import type { Discussion, DiscussionSnapshot, StreamEvent } from '@aps/shared';
 import type {
   ConnectionStatus,
   DiscussionEventSource
 } from './eventSource';
-import { initState, reduce } from './discussionReducer';
+import {
+  initState,
+  patchDiscussionState,
+  reduce
+} from './discussionReducer';
 
 type Action =
   | { type: 'event'; event: StreamEvent; eventSeq?: number }
-  | { type: 'replace'; snapshot: DiscussionSnapshot };
+  | { type: 'replace'; snapshot: DiscussionSnapshot }
+  | { type: 'patchDiscussion'; discussion: Discussion };
 
 function stateReducer(state: ReturnType<typeof initState>, action: Action) {
-  return action.type === 'replace'
-    ? initState(action.snapshot)
-    : reduce(state, action.event, action.eventSeq);
+  if (action.type === 'replace') return initState(action.snapshot);
+  if (action.type === 'patchDiscussion') {
+    return patchDiscussionState(state, action.discussion);
+  }
+  return reduce(state, action.event, action.eventSeq);
 }
 
 export function useDiscussion(
@@ -47,6 +54,11 @@ export function useDiscussion(
       dispatch({ type: 'event', event, eventSeq }),
     []
   );
+  const patchDiscussion = useCallback(
+    (discussion: Discussion) =>
+      dispatch({ type: 'patchDiscussion', discussion }),
+    []
+  );
 
-  return { state, connection, dispatchEvent };
+  return { state, connection, dispatchEvent, patchDiscussion };
 }

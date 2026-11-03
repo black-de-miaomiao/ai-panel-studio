@@ -3,13 +3,16 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import App from './App';
+import { DiscussionApiProvider } from './api/DiscussionApiContext';
 import { mockApi } from './mocks/mockApi';
 
 function renderAt(path: string) {
   return render(
-    <MemoryRouter initialEntries={[path]}>
-      <App />
-    </MemoryRouter>
+    <DiscussionApiProvider api={mockApi}>
+      <MemoryRouter initialEntries={[path]}>
+        <App />
+      </MemoryRouter>
+    </DiscussionApiProvider>
   );
 }
 

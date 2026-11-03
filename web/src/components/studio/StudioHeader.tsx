@@ -21,6 +21,8 @@ import { ConnectionBadge } from './ConnectionBadge';
 interface StudioHeaderProps {
   state: DiscussionState;
   connection: ConnectionStatus;
+  busy?: boolean;
+  demoMode?: boolean;
   onBack: () => void;
   onStart: () => void;
   onPause: () => void;
@@ -39,6 +41,8 @@ function statusTone(status: DiscussionStatus) {
 export function StudioHeader({
   state,
   connection,
+  busy = false,
+  demoMode = false,
   onBack,
   onStart,
   onPause,
@@ -83,6 +87,12 @@ export function StudioHeader({
           <h1 className="studio-header__topic" title={discussion.topic}>
             {discussion.topic}
           </h1>
+          {demoMode ? (
+            <span className="studio-demo-tag">
+              <span aria-hidden="true" />
+              DEMO REPLAY
+            </span>
+          ) : null}
         </div>
 
         <div className="studio-header__telemetry">
@@ -115,6 +125,7 @@ export function StudioHeader({
         <div className="studio-header__controls">
           {discussion.status === 'lineup_ready' ? (
             <Button
+              disabled={busy}
               icon={<Play size={15} />}
               onClick={onStart}
               size="sm"
@@ -126,6 +137,7 @@ export function StudioHeader({
           {discussion.status === 'live' ? (
             <>
               <Button
+                disabled={busy}
                 icon={<Pause size={15} />}
                 onClick={onPause}
                 size="sm"
@@ -134,6 +146,7 @@ export function StudioHeader({
                 暂停
               </Button>
               <Button
+                disabled={busy}
                 icon={<CircleStop size={15} />}
                 onClick={() => setConfirmOpen(true)}
                 size="sm"
@@ -146,6 +159,7 @@ export function StudioHeader({
           {discussion.status === 'paused' ? (
             <>
               <Button
+                disabled={busy}
                 icon={<RotateCcw size={15} />}
                 onClick={onResume}
                 size="sm"
@@ -154,6 +168,7 @@ export function StudioHeader({
                 继续
               </Button>
               <Button
+                disabled={busy}
                 icon={<CircleStop size={15} />}
                 onClick={() => setConfirmOpen(true)}
                 size="sm"
@@ -174,7 +189,7 @@ export function StudioHeader({
 
       <ConfirmDialog
         open={confirmOpen}
-        busy={ending}
+        busy={ending || busy}
         title="结束这场讨论？"
         description="当前发言结束后，演播厅将进入主持人总结。结束后仍可回看并导出实录。"
         confirmLabel="结束并生成总结"
