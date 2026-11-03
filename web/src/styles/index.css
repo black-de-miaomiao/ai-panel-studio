@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: #05070D;
+  color: #E6E8EE;
+  font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+}
+
+.app-shell {
+  display: grid;
+  min-height: 100%;
+  place-items: center;
+  padding: 2rem;
+}
+
+.panel {
+  width: min(100%, 42rem);
+  padding: 3rem;
+  border: 1px solid rgb(230 232 238 / 12%);
+  border-radius: 1.5rem;
+  background: rgb(230 232 238 / 4%);
+}
+
+.eyebrow {
+  color: #A7B0C0;
+  font-size: 0.875rem;
+  letter-spacing: 0.08em;
+}
