@@ -4,21 +4,11 @@ import type { DatabaseSync } from 'node:sqlite';
 import { getById } from '../db/repositories/discussions';
 import { listSince } from '../db/repositories/events';
 import type { DiscussionEventBus, EventEnvelope } from '../engine/eventBus';
+import { sendApiError } from './errors';
 
 export interface StreamRouteDeps {
   db: DatabaseSync;
   bus: DiscussionEventBus;
-}
-
-function sendError(
-  response: Response,
-  status: number,
-  code: string,
-  message: string
-): void {
-  response.status(status).json({
-    error: { code, message }
-  });
 }
 
 function parseCursor(value: string | undefined): number | null {
@@ -53,7 +43,7 @@ function streamError(
   const rawId = request.params.id;
   const discussionId = Array.isArray(rawId) ? rawId[0] ?? '' : rawId;
   if (!getById(deps.db, discussionId)) {
-    sendError(response, 404, 'NOT_FOUND', '讨论不存在');
+    sendApiError(response, 404, 'NOT_FOUND', '讨论不存在');
     return;
   }
 
@@ -62,21 +52,21 @@ function streamError(
   let cursor: number;
   if (lastEventIdHeader !== undefined) {
     if (headerCursor === null || Number.isNaN(headerCursor)) {
-      sendError(response, 400, 'VALIDATION_ERROR', '事件游标无效');
+      sendApiError(response, 400, 'VALIDATION_ERROR', '事件游标无效');
       return;
     }
     cursor = headerCursor;
   } else {
     const sinceParameter = request.query.since;
     if (sinceParameter !== undefined && typeof sinceParameter !== 'string') {
-      sendError(response, 400, 'VALIDATION_ERROR', '事件游标无效');
+      sendApiError(response, 400, 'VALIDATION_ERROR', '事件游标无效');
       return;
     }
     const queryCursor = parseCursor(
       typeof sinceParameter === 'string' ? sinceParameter : undefined
     );
     if (queryCursor !== null && Number.isNaN(queryCursor)) {
-      sendError(response, 400, 'VALIDATION_ERROR', '事件游标无效');
+      sendApiError(response, 400, 'VALIDATION_ERROR', '事件游标无效');
       return;
     }
     cursor = queryCursor ?? 0;

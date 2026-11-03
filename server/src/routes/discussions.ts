@@ -28,6 +28,7 @@ import type { DiscussionEventBus, EventEnvelope } from '../engine/eventBus';
 import type { DiscussionManager } from '../engine/manager';
 import type { LLMGateway } from '../llm/gateway';
 import type { DatabaseSync } from 'node:sqlite';
+import { sendApiError } from './errors';
 
 export interface DiscussionsRouteDeps {
   db: DatabaseSync;
@@ -41,22 +42,6 @@ const statusFilterSchema = z.array(z.enum(DISCUSSION_STATUSES)).min(1);
 
 function isoNow(): string {
   return new Date().toISOString();
-}
-
-function sendError(
-  response: Response,
-  status: number,
-  code: string,
-  message: string,
-  details?: unknown[]
-): void {
-  response.status(status).json({
-    error: {
-      code,
-      message,
-      ...(details ? { details } : {})
-    }
-  });
 }
 
 function broadcastPersisted(
@@ -284,9 +269,9 @@ export function createDiscussionsRouter(
     result: 'not-found' | 'state-conflict'
   ): void => {
     if (result === 'not-found') {
-      sendError(response, 404, 'NOT_FOUND', '讨论不存在');
+      sendApiError(response, 404, 'NOT_FOUND', '讨论不存在');
     } else {
-      sendError(
+      sendApiError(
         response,
         409,
         'INVALID_STATE',
@@ -300,7 +285,7 @@ export function createDiscussionsRouter(
     const rawStatus = request.query.status;
     if (rawStatus !== undefined) {
       if (typeof rawStatus !== 'string') {
-        sendError(
+        sendApiError(
           response,
           400,
           'VALIDATION_ERROR',
@@ -310,7 +295,7 @@ export function createDiscussionsRouter(
       }
       const parsed = statusFilterSchema.safeParse(rawStatus.split(','));
       if (!parsed.success) {
-        sendError(
+        sendApiError(
           response,
           400,
           'VALIDATION_ERROR',
@@ -331,7 +316,7 @@ export function createDiscussionsRouter(
   router.post('/', async (request, response) => {
     const parsed = CreateDiscussionRequestSchema.safeParse(request.body);
     if (!parsed.success) {
-      sendError(
+      sendApiError(
         response,
         400,
         'VALIDATION_ERROR',
@@ -358,7 +343,7 @@ export function createDiscussionsRouter(
           sendLineupWriteFailure(response, failure);
           return;
         }
-        sendError(response, 502, 'LLM_ERROR', '暂时无法生成阵容，请稍后重试', [
+        sendApiError(response, 502, 'LLM_ERROR', '暂时无法生成阵容，请稍后重试', [
           { discussionId: discussion.id }
         ]);
         return;
@@ -376,7 +361,7 @@ export function createDiscussionsRouter(
       }
       const snapshot = getSnapshot(deps, discussion.id);
       if (!snapshot) {
-        sendError(response, 500, 'INTERNAL', '服务器内部错误');
+        sendApiError(response, 500, 'INTERNAL', '服务器内部错误');
         return;
       }
       response.status(201).json({ snapshot });
@@ -388,7 +373,7 @@ export function createDiscussionsRouter(
   router.get('/:id', (request, response) => {
     const snapshot = getSnapshot(deps, request.params.id);
     if (!snapshot) {
-      sendError(response, 404, 'NOT_FOUND', '讨论不存在');
+      sendApiError(response, 404, 'NOT_FOUND', '讨论不存在');
       return;
     }
     response.json({ snapshot });
@@ -399,11 +384,11 @@ export function createDiscussionsRouter(
     const discussionId = Array.isArray(rawId) ? rawId[0] ?? '' : rawId;
     const discussion = getById(deps.db, discussionId);
     if (!discussion) {
-      sendError(response, 404, 'NOT_FOUND', '讨论不存在');
+      sendApiError(response, 404, 'NOT_FOUND', '讨论不存在');
       return;
     }
     if (lineupGenerating.has(discussionId)) {
-      sendError(
+      sendApiError(
         response,
         409,
         'INVALID_STATE',
@@ -415,7 +400,7 @@ export function createDiscussionsRouter(
       discussion.status !== 'lineup_ready' &&
       discussion.status !== 'failed'
     ) {
-      sendError(response, 409, 'INVALID_STATE', '当前状态不允许更换阵容');
+      sendApiError(response, 409, 'INVALID_STATE', '当前状态不允许更换阵容');
       return;
     }
 
@@ -434,7 +419,7 @@ export function createDiscussionsRouter(
           return;
         }
         if (preserveReadyLineup) {
-          sendError(
+          sendApiError(
             response,
             502,
             'LLM_ERROR',
@@ -443,7 +428,7 @@ export function createDiscussionsRouter(
           );
           return;
         }
-        sendError(response, 502, 'LLM_ERROR', '暂时无法生成阵容，请稍后重试', [
+        sendApiError(response, 502, 'LLM_ERROR', '暂时无法生成阵容，请稍后重试', [
           { discussionId }
         ]);
         return;
@@ -461,7 +446,7 @@ export function createDiscussionsRouter(
       }
       const snapshot = getSnapshot(deps, discussionId);
       if (!snapshot) {
-        sendError(response, 500, 'INTERNAL', '服务器内部错误');
+        sendApiError(response, 500, 'INTERNAL', '服务器内部错误');
         return;
       }
       response.json({ snapshot });
@@ -477,11 +462,11 @@ export function createDiscussionsRouter(
     const rawId = request.params.id;
     const discussionId = Array.isArray(rawId) ? rawId[0] ?? '' : rawId;
     if (!getById(deps.db, discussionId)) {
-      sendError(response, 404, 'NOT_FOUND', '讨论不存在');
+      sendApiError(response, 404, 'NOT_FOUND', '讨论不存在');
       return;
     }
     if (action === 'start' && lineupGenerating.has(discussionId)) {
-      sendError(
+      sendApiError(
         response,
         409,
         'INVALID_STATE',
@@ -491,7 +476,7 @@ export function createDiscussionsRouter(
     }
     const discussion = deps.manager[action](discussionId);
     if (!discussion) {
-      sendError(response, 409, 'INVALID_STATE', '当前讨论状态不允许此操作');
+      sendApiError(response, 409, 'INVALID_STATE', '当前讨论状态不允许此操作');
       return;
     }
     response.status(statusCode).json({ discussion });
@@ -504,7 +489,7 @@ export function createDiscussionsRouter(
 
   router.delete('/:id', (request, response) => {
     if (!deps.manager.remove(request.params.id)) {
-      sendError(response, 404, 'NOT_FOUND', '讨论不存在');
+      sendApiError(response, 404, 'NOT_FOUND', '讨论不存在');
       return;
     }
     response.status(204).end();

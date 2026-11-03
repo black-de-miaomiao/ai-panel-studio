@@ -89,7 +89,8 @@ describe('createApp', () => {
     expect(response.body).toEqual({
       error: {
         code: 'NOT_FOUND',
-        message: '接口不存在'
+        message: '接口不存在',
+        details: []
       }
     });
   });

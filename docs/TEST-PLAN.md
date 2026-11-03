@@ -65,7 +65,7 @@
 | OpenAI 兼容请求、思考模式字段映射、Reasoning 丢弃、SSE 分片、重试、密钥保护与超时 | `server/src/llm/openaiCompatible.test.ts` |
 | Mock 确定性、任务结构、真实关系证据、流式一致性与故障注入 | `server/src/llm/mock.test.ts` |
 | 讨论运行、暂停/结束、抢答额度、出价格式重试、洞察重试、错误恢复及并行隔离 | `server/src/engine/runner.test.ts`、`server/src/engine/isolation.test.ts` |
-| REST 状态、输入校验、错误响应、删除与密钥边界 | `server/src/routes/api.test.ts` |
+| REST 状态、输入校验、错误响应契约（所有错误响应均通过 `ApiErrorBodySchema`，`details` 始终为数组）、删除与密钥边界 | `server/src/routes/api.test.ts`，含「各类错误响应均符合共享错误契约且 details 始终为数组」；`server/src/app.test.ts` 的未知接口 404 |
 | SSE 首事件、事件补发游标、重连优先级、观众数与实时片段 | `server/src/routes/stream.test.ts` |
 
 ## 4. Mock LLM 策略与故障注入

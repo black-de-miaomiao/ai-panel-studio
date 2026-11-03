@@ -1,10 +1,13 @@
 import { DatabaseSync } from 'node:sqlite';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type {
-  Discussion,
-  LiveUtterance,
-  StreamEvent
+import {
+  ApiErrorBodySchema,
+  type ApiErrorBody,
+  type ApiErrorCode,
+  type Discussion,
+  type LiveUtterance,
+  type StreamEvent
 } from '@aps/shared';
 import { createApp } from '../app';
 import {
@@ -96,7 +99,9 @@ function createToggleFailureGateway() {
 function createTestApp(options: {
   failOnLineup?: boolean;
   llm?: LLMGateway;
+  database?: DatabaseSync;
 } = {}) {
+  const testDatabase = options.database ?? database;
   const config = createTestConfig({
     llm: {
       apiKey: fakeApiKey,
@@ -128,34 +133,57 @@ function createTestApp(options: {
   };
   const manager: DiscussionManager = {
     start: (discussionId: string): Discussion | null => {
-      const discussion = getById(database, discussionId);
+      const discussion = getById(testDatabase, discussionId);
       return discussion?.status === 'lineup_ready'
-        ? updateStatus(database, discussionId, 'live', {
+        ? updateStatus(testDatabase, discussionId, 'live', {
             startedAt: new Date().toISOString()
           })
         : null;
     },
     pause: (discussionId: string): Discussion | null =>
-      getById(database, discussionId)?.status === 'live'
-        ? updateStatus(database, discussionId, 'paused')
+      getById(testDatabase, discussionId)?.status === 'live'
+        ? updateStatus(testDatabase, discussionId, 'paused')
         : null,
     resume: (discussionId: string): Discussion | null =>
-      getById(database, discussionId)?.status === 'paused'
-        ? updateStatus(database, discussionId, 'live')
+      getById(testDatabase, discussionId)?.status === 'paused'
+        ? updateStatus(testDatabase, discussionId, 'live')
         : null,
     end: (discussionId: string): Discussion | null => {
-      const status = getById(database, discussionId)?.status;
+      const status = getById(testDatabase, discussionId)?.status;
       return status === 'live' || status === 'paused'
-        ? updateStatus(database, discussionId, 'summarizing')
+        ? updateStatus(testDatabase, discussionId, 'summarizing')
         : null;
     },
-    remove: (discussionId: string) => removeDiscussion(database, discussionId),
+    remove: (discussionId: string) =>
+      removeDiscussion(testDatabase, discussionId),
     recoverOnBoot: () => undefined,
     getLiveUtterance: (_discussionId: string): LiveUtterance | null => null,
     stopAll: () => undefined
   };
 
-  return createApp({ config, db: database, llm, bus, manager });
+  return createApp({ config, db: testDatabase, llm, bus, manager });
+}
+
+function expectApiError(
+  response: { status: number; body: unknown },
+  status: number,
+  code: ApiErrorCode,
+  details: unknown[] = []
+): ApiErrorBody {
+  expect(response.status).toBe(status);
+  const parsed = ApiErrorBodySchema.safeParse(response.body);
+  const parseFailure = parsed.success
+    ? undefined
+    : parsed.error.issues
+        .map(({ path, message }) => `${path.join('.')}: ${message}`)
+        .join('; ');
+  expect(parsed.success, parseFailure).toBe(true);
+  if (!parsed.success) {
+    throw new Error('错误响应不符合共享契约');
+  }
+  expect(parsed.data.error.code).toBe(code);
+  expect(parsed.data.error.details).toEqual(details);
+  return parsed.data;
 }
 
 beforeEach(() => {
@@ -183,6 +211,82 @@ describe('讨论 REST API', () => {
     expect(malformedJson.status).toBe(400);
     expect(malformedJson.body.error.code).toBe('VALIDATION_ERROR');
     expect(malformedJson.body.error.message).toMatch(/[\u3400-\u9fff]/);
+  });
+
+  it('各类错误响应均符合共享错误契约且 details 始终为数组', async () => {
+    const malformedJson = await request(app)
+      .post('/api/discussions')
+      .set('content-type', 'application/json')
+      .send('{"topic":');
+    const emptyTopic = await request(app)
+      .post('/api/discussions')
+      .send({ topic: '' });
+    const invalidStatus = await request(app).get(
+      '/api/discussions?status=live,unknown'
+    );
+
+    expectApiError(malformedJson, 400, 'VALIDATION_ERROR');
+    expectApiError(emptyTopic, 400, 'VALIDATION_ERROR');
+    expectApiError(invalidStatus, 400, 'VALIDATION_ERROR');
+
+    const unknownRoute = await request(app).get('/api/unknown');
+    const missingSnapshot = await request(app).get(
+      '/api/discussions/00000000-0000-4000-8000-000000000999'
+    );
+    const missingControl = await request(app).post(
+      '/api/discussions/00000000-0000-4000-8000-000000000999/pause'
+    );
+
+    expectApiError(unknownRoute, 404, 'NOT_FOUND');
+    expectApiError(missingSnapshot, 404, 'NOT_FOUND');
+    expectApiError(missingControl, 404, 'NOT_FOUND');
+
+    const lineupReady = listDiscussions(database).find(
+      ({ status }) => status === 'lineup_ready'
+    );
+    expect(lineupReady).toBeTruthy();
+    if (!lineupReady) {
+      throw new Error('种子数据缺少待开播讨论');
+    }
+    const invalidPause = await request(app).post(
+      `/api/discussions/${lineupReady.id}/pause`
+    );
+    expectApiError(invalidPause, 409, 'INVALID_STATE');
+
+    app = createTestApp({ failOnLineup: true });
+    const lineupFailure = await request(app)
+      .post('/api/discussions')
+      .send({ topic: '阵容失败契约测试', expertCount: 2 });
+    const lineupError = expectApiError(
+      lineupFailure,
+      502,
+      'LLM_ERROR',
+      [{ discussionId: expect.any(String) }]
+    );
+    expect(lineupError.error.details[0]).toMatchObject({
+      discussionId: expect.any(String)
+    });
+
+    const missingStream = await request(app).get(
+      '/api/discussions/00000000-0000-4000-8000-000000000999/stream'
+    );
+    const invalidStreamCursor = await request(app)
+      .get(`/api/discussions/${lineupReady.id}/stream`)
+      .set('Last-Event-ID', 'not-a-number');
+    expectApiError(missingStream, 404, 'NOT_FOUND');
+    expectApiError(invalidStreamCursor, 400, 'VALIDATION_ERROR');
+
+    const closedDatabase = createTestDb({ seed: true });
+    const brokenApp = createTestApp({ database: closedDatabase });
+    closedDatabase.close();
+    const internalError = await request(brokenApp).get('/api/discussions');
+    const internalBody = expectApiError(
+      internalError,
+      500,
+      'INTERNAL'
+    );
+    expect(internalBody.error.message).toBe('服务器内部错误');
+    expect(internalError.text).not.toContain('stack');
   });
 
   it('拒绝空话题越界长度和非法专家人数并返回中文校验错误', async () => {

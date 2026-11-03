@@ -6,6 +6,7 @@ import type { DiscussionEventBus } from './engine/eventBus';
 import type { DiscussionManager } from './engine/manager';
 import type { LLMGateway } from './llm/gateway';
 import { createDiscussionsRouter } from './routes/discussions';
+import { sendApiError } from './routes/errors';
 import { createStreamRouter } from './routes/stream';
 
 export function createApp(deps: {
@@ -44,12 +45,12 @@ export function createApp(deps: {
     _next
   ) => {
     if (error instanceof z.ZodError) {
-      response.status(400).json({
-        error: {
-          code: 'VALIDATION_ERROR',
-          message: error.issues[0]?.message ?? '请求参数无效'
-        }
-      });
+      sendApiError(
+        response,
+        400,
+        'VALIDATION_ERROR',
+        error.issues[0]?.message ?? '请求参数无效'
+      );
       return;
     }
     if (
@@ -59,30 +60,20 @@ export function createApp(deps: {
       'type' in error &&
       error.type === 'entity.parse.failed'
     ) {
-      response.status(400).json({
-        error: {
-          code: 'VALIDATION_ERROR',
-          message: '请求体 JSON 格式无效'
-        }
-      });
+      sendApiError(
+        response,
+        400,
+        'VALIDATION_ERROR',
+        '请求体 JSON 格式无效'
+      );
       return;
     }
-    response.status(500).json({
-      error: {
-        code: 'INTERNAL',
-        message: '服务器内部错误'
-      }
-    });
+    sendApiError(response, 500, 'INTERNAL', '服务器内部错误');
   };
   app.use(errorHandler);
 
   app.use((_request, response) => {
-    response.status(404).json({
-      error: {
-        code: 'NOT_FOUND',
-        message: '接口不存在'
-      }
-    });
+    sendApiError(response, 404, 'NOT_FOUND', '接口不存在');
   });
 
   return app;
