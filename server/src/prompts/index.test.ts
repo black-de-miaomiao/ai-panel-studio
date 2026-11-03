@@ -190,6 +190,18 @@ describe('runtime prompt builders', () => {
     );
   });
 
+  it('主持人开场不指定第一位发言者', () => {
+    const opening = buildHostPrompt({
+      ...discussion,
+      hostRoleCard: hostCard,
+      action: 'opening',
+      targetAlias: null
+    });
+
+    expect(opening.system).toContain('不指定由谁先发言');
+    expect(opening.system).toContain('第一位发言者由嘉宾举手决定');
+  });
+
   it('五个讨论 builder 渲染包含姓名、身份和立场的阵容名册', () => {
     const prompts = allPrompts().slice(1);
     const rosterLine =
@@ -202,20 +214,65 @@ describe('runtime prompt builders', () => {
     }
   });
 
-  it('出价明确呈现上一条发言与代码计算的立场关系及紧急度刻度', () => {
+  it('出价明确呈现双方立场原文、方向关系及紧急度刻度', () => {
     const bid = allPrompts()[1];
 
     expect(bid?.user).toContain(
-      '上一条发言：#12 E2 陈澄（审慎）'
+      '上一条发言：#12 E2 陈澄（立场标签：审慎；立场原文：担心复杂问题中的信任下降。）'
     );
-    expect(bid?.user).toContain('与你的立场：不同');
+    expect(bid?.user).toContain('与你的立场方向关系：一方中立或谨慎');
+    expect(bid?.user).toContain(
+      '当前专家立场原文：担心基础任务减少会压缩新人练习的入口。'
+    );
     expect(bid?.system).toContain('0.85–1.00');
     expect(bid?.system).toContain('同一轮通常只有一两位专家');
-    expect(bid?.system).toContain('优先 rebut');
-    expect(bid?.system).toContain('对方刚说完');
+    expect(bid?.system).toContain(
+      '立场方向相反且有具体漏洞时优先回应并说明'
+    );
+    expect(bid?.system).toContain('只有上一条是专家发言');
     expect(bid?.system).toContain('核心立场直接冲突');
-    expect(bid?.system).toContain('整场中偶尔出现');
-    expect(bid?.system).toContain('只有确实无法接受时才抢答');
+    expect(bid?.system).toContain('interrupt 与 rebut 的区别');
+    expect(bid?.system).toContain('不构成抢答理由');
+    expect(bid?.system).toContain('其他具体反驳用 rebut');
+    expect(bid?.system).toContain('interrupt 应是偶发而非常态');
+    expect(bid?.system).toContain('不满足时不得因急于表达而抢答');
+    expect(bid?.system).toContain('有条件支持”与“支持”属于同向');
+    expect(bid?.system).toContain('“谨慎/观望”不等于反对');
+  });
+
+  it('interrupt 话语避免重复固定插话开头', () => {
+    const prompt = buildUtterancePrompt({
+      ...discussion,
+      speakerAlias: 'E1',
+      speaker: card,
+      act: 'interrupt',
+      replyToAlias: 'E2'
+    });
+
+    expect(prompt.system).toContain('只有确有紧急必要时才用插入语');
+    expect(prompt.system).toContain('避免反复使用“等一下”等固定开头');
+  });
+
+  it('有条件支持与支持属于同向，支持与反对属于相反方向', () => {
+    const promptFor = (previousTag: string) =>
+      buildBidPrompt({
+        ...discussion,
+        roster: roster.map((entry) =>
+          entry.alias === 'E2'
+            ? { ...entry, stanceTag: previousTag }
+            : entry
+        ),
+        speakerAlias: 'E1',
+        speaker: card,
+        previousUtterance: { seq: 3, speakerAlias: 'E2' }
+      });
+
+    expect(promptFor('支持').user).toContain(
+      '与你的立场方向关系：方向相同'
+    );
+    expect(promptFor('反对').user).toContain(
+      '与你的立场方向关系：方向相反'
+    );
   });
 
   it('主持 bridge 给出双方姓名与立场且 invite 给出目标身份', () => {
@@ -255,7 +312,13 @@ describe('runtime prompt builders', () => {
       '#12 E2 陈澄（rebut，回应E1 周明）：第12条真实发言。'
     );
     expect(insight?.user).toContain('本次新增真实发言');
-    expect(insight?.system).toContain('supplement 若明确接着对方观点往下补');
+    expect(insight?.system).toContain(
+      '局部共识可以与同一议题中的分歧并存'
+    );
+    expect(insight?.system).toContain(
+      '每条 supplement 都要检查是否明确承接'
+    );
+    expect(insight?.system).toContain('不得为达到条数而拆分或制造洞察');
     expect(insight?.system).toContain('使用已有 ref 更新同一条分歧');
     expect(insight?.system).toContain('evidence 可引用最近发言窗口');
   });
@@ -349,6 +412,8 @@ describe('runtime prompt builders', () => {
     expect(prompt.system).toContain(
       '才能使用“双方都承认”“大家都同意”或同义的共识表述'
     );
+    expect(prompt.system).toContain('几位/所有嘉宾都承认、都认为');
+    expect(prompt.system).toContain('把洞察区没有的局部共识推断出来');
   });
 
   it('发言提示词要求事实依据且总结不加入洞察区外的结论', () => {
@@ -364,6 +429,10 @@ describe('runtime prompt builders', () => {
     expect(utterance.system).toContain(
       '角色背景不能当作具体事实的证据'
     );
+    expect(utterance.system).toContain(
+      '不要反复复用最近发言中已经出现的反驳模板'
+    );
+    expect(utterance.system).toContain('避免一再使用“恰恰……”');
     expect(summary.system).toContain('共识与分歧以洞察区为准');
     expect(summary.system).toContain('不要说成“大家都同意”或“已形成共识”');
     expect(summary.system).toContain(

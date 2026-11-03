@@ -222,13 +222,56 @@ function renderHostDivergence(
   return `${safeText(divergence.content)}${sides ? `；${sides}` : ''}`;
 }
 
+type StanceDirection = 'supportive' | 'opposed' | 'neutral' | 'unknown';
+
+function stanceDirection(stanceTag: string): StanceDirection {
+  const normalized = stanceTag.trim();
+  if (/(?:反对|不支持|不赞成|不认同|否定)/u.test(normalized)) {
+    return 'opposed';
+  }
+  if (/(?:支持|赞成|认同|认可|赞同|看好|乐观)/u.test(normalized)) {
+    return 'supportive';
+  }
+  if (/(?:中立|观望|谨慎|审慎|保留)/u.test(normalized)) {
+    return 'neutral';
+  }
+  return 'unknown';
+}
+
+function stanceRelation(
+  previousTag: string,
+  currentTag: string
+): '方向相同' | '方向相反' | '一方中立或谨慎' | '方向不明' {
+  const previousDirection = stanceDirection(previousTag);
+  const currentDirection = stanceDirection(currentTag);
+  if (previousDirection === 'unknown' || currentDirection === 'unknown') {
+    return '方向不明';
+  }
+  if (previousDirection === currentDirection) {
+    return '方向相同';
+  }
+  if (
+    (previousDirection === 'supportive' && currentDirection === 'opposed') ||
+    (previousDirection === 'opposed' && currentDirection === 'supportive')
+  ) {
+    return '方向相反';
+  }
+  return '一方中立或谨慎';
+}
+
 function previousUtteranceContext(
   previous: PreviousUtterancePromptContext | null,
   roster: readonly PromptRosterEntry[],
   currentSpeaker: PromptRoleCard
 ): {
   line: string;
-  relation: '相同' | '不同' | '主持人发言' | '暂无上一条发言';
+  relation:
+    | '方向相同'
+    | '方向相反'
+    | '一方中立或谨慎'
+    | '方向不明'
+    | '主持人发言'
+    | '暂无上一条发言';
 } {
   if (!previous || !Number.isInteger(previous.seq) || previous.seq < 1) {
     return { line: '（暂无上一条发言）', relation: '暂无上一条发言' };
@@ -247,11 +290,9 @@ function previousUtteranceContext(
   const relation =
     alias === 'H'
       ? '主持人发言'
-      : speaker.stanceTag === currentSpeaker.stanceTag
-        ? '相同'
-        : '不同';
+      : stanceRelation(speaker.stanceTag, currentSpeaker.stanceTag);
   return {
-    line: `#${previous.seq} ${alias} ${speaker.name}（${speaker.stanceTag}）`,
+    line: `#${previous.seq} ${alias} ${speaker.name}（立场标签：${safeText(speaker.stanceTag)}；立场原文：${safeText(speaker.stance)}）`,
     relation
   };
 }
@@ -433,7 +474,7 @@ export function buildBidPrompt(input: BidPromptInput): PromptParts {
     instruction:
       '结合上一条发言与立场关系判断是否有真实新内容；无内容时不要发言。'
   };
-  const system = `你是中文圆桌讨论中的专家出价器。只根据角色卡、话题、共识分歧和最近发言判断，不补造 transcript 中没有的观点。意图只能是 raise_hand、interrupt、supplement 或 rebut。立场不同且能指出对方具体漏洞时优先 rebut；rebut 必须指出真实漏洞，supplement 必须补充新条件或关键例子。urgency 刻度：0.85–1.00 用于被点名，或对方观点与你的核心立场直接冲突且你有具体反驳；0.60–0.80 用于有明确反驳点或关键补充；0.30–0.55 用于一般补充。主持人已点名当前专家时必须 wantToSpeak=true 且 urgency 至少 0.85；没有真实新内容时 wantToSpeak=false。同一轮通常只有一两位专家有强烈发言欲望；刚发过言，或只想重复同类观点时不要发言。interrupt 仅用于对方刚说完、其观点与你的核心立场直接冲突且你迫切需要当场回应时；只有确实无法接受时才抢答，urgency 至少 0.85，整场中偶尔出现而非常态。focus 是公开关注点，不是推理过程，最多20字。
+  const system = `你是中文圆桌讨论中的专家出价器。只根据角色卡、话题、共识分歧和最近发言判断，不补造 transcript 中没有的观点。意图只能是 raise_hand、interrupt、supplement 或 rebut。立场方向相反且有具体漏洞时优先回应并说明；通常用 rebut 表达具体反驳，supplement 必须补充新条件或关键例子。立场标签只提供粗略方向，必须结合双方立场原文和最近发言判断；“有条件支持”与“支持”属于同向，“谨慎/观望”不等于反对，不得仅因标签文字不相同就推断核心冲突。urgency 刻度：0.85–1.00 用于被点名，或对方观点与你的核心立场直接冲突且你有具体反驳；0.60–0.80 用于有明确反驳点或关键补充；0.30–0.55 用于一般补充。主持人已点名当前专家时必须 wantToSpeak=true 且 urgency 至少 0.85；没有真实新内容时 wantToSpeak=false。同一轮通常只有一两位专家有强烈发言欲望；刚发过言，或只想重复同类观点时不要发言。interrupt 与 rebut 的区别：只有上一条是专家发言、你指出了具体且迫切的核心漏洞，并且延后到正常回应会造成误解或遗漏关键条件时，才选择 interrupt；“上一条刚结束”或存在一般反驳点本身不构成抢答理由。满足上述紧急条件且确实要发言时用 interrupt，其他具体反驳用 rebut；不满足时不得因急于表达而抢答。interrupt 应是偶发而非常态，urgency 至少 0.85。focus 是公开关注点，不是推理过程，最多20字。
 只输出 JSON，字段必须完整且严格为：{"wantToSpeak":布尔值,"intent":"raise_hand|interrupt|supplement|rebut","urgency":0到1之间的数字,"replyTo":"H或E1..En或null","focus":"最多20字的字符串或null"}。不得输出思维过程、额外字段或 Markdown。`;
   const user = `话题：${topicBlock(base.topic)}
 当前专家别名：${safeText(input.speakerAlias)}
@@ -444,7 +485,8 @@ ${base.rosterText}
 当前共识与分歧：
 ${base.insightsText}
 上一条发言：${previous.line}
-与你的立场：${previous.relation}
+与你的立场方向关系：${previous.relation}
+当前专家立场原文：${safeText(speaker.stance)}
 最近发言（最多10条，按时间正序）：
 ${base.transcriptWindow}
 本次任务：${input.addressed ? '主持人已经点名当前专家，必须举手回应。' : '结合自身立场、上一条发言和最近讨论判断；不得重复刚才已说过的内容。'}`;
@@ -456,7 +498,7 @@ function actGuidance(act: SpeechAct): string {
     case 'statement':
       return '提出一个新论点或新角度，避免复述已有发言。';
     case 'interrupt':
-      return '短促有力，可用“等一下”或“我得插一句”开头，直接回应当前争点。';
+      return '短促有力，直接回应当前争点；只有确有紧急必要时才用插入语，避免反复使用“等一下”等固定开头。';
     case 'supplement':
       return '接着对方观点补上一个对方尚未提到的条件或具体例子。';
     case 'rebut':
@@ -488,7 +530,7 @@ export function buildUtterancePrompt(
     replyToAlias: input.replyToAlias ? safeText(input.replyToAlias) : null,
     instruction: actGuidance(input.act)
   };
-  const system = `你是中文电视圆桌中的专家嘉宾，正在现场发言。口语自然、直接，有具体机制、条件或例子；必须回应最近发言中真实出现的观点，不编造报告、机构或精确数字，也不声称未经上下文支持的个人经历、公司观察或行业趋势。角色背景不能当作具体事实的证据；缺少依据时应将内容表述为条件、推测或问题。引用数据需加“据我了解”“大致”等限定。不客套，不重复自己已经说过的话，不加姓名前缀，不用 Markdown，不写动作或括号旁白。整段最多2句、约80字。
+  const system = `你是中文电视圆桌中的专家嘉宾，正在现场发言。口语自然、直接，有具体机制、条件或例子；必须回应最近发言中真实出现的观点，不编造报告、机构或精确数字，也不声称未经上下文支持的个人经历、公司观察或行业趋势。角色背景不能当作具体事实的证据；缺少依据时应将内容表述为条件、推测或问题。引用数据需加“据我了解”“大致”等限定。不客套，不重复自己已经说过的话，不加姓名前缀，不用 Markdown，不写动作或括号旁白。不要反复复用最近发言中已经出现的反驳模板或转折句式，避免一再使用“恰恰……”或重复“你说X但Y”；改为回应不同的具体前提、机制或条件，不为变换措辞而增加新事实。整段最多2句、约80字。
 ${actGuidance(input.act)}`;
   const user = `话题：${topicBlock(base.topic)}
 角色卡：${roleCardJson(speaker)}
@@ -508,7 +550,7 @@ ${actGuidance(input.act)} 只能依据以上真实发言组织1至2句中文现�
 function hostGuidance(action: HostAct): string {
   switch (action) {
     case 'opening':
-      return '开场最多3句：欢迎观众并点出话题核心矛盾；必须另用一句按嘉宾名单顺序逐一说出所有嘉宾姓名和职业、Title，不得用“几个领域”等概括代替名单。';
+      return '开场最多3句：欢迎观众并点出话题核心矛盾；必须另用一句按嘉宾名单顺序逐一说出所有嘉宾姓名和职业、Title，不得用“几个领域”等概括代替名单。不指定由谁先发言，第一位发言者由嘉宾举手决定。';
     case 'follow_up':
       return '针对目标专家最近的发言追问一个更具体或更尖锐的问题。';
     case 'bridge':
@@ -626,7 +668,7 @@ export function buildInsightsPrompt(input: {
   };
   const transcriptText = renderInsightUtterances(transcriptWindow, roster);
   const utteranceText = renderInsightUtterances(newUtterances, roster);
-  const system = `你是节目实时字幕编辑，只返回新增或变化的共识与分歧，不重复未变化条目。宁缺毋滥：只有明确的认同或明确的对立才记录；一旦发言明确表达认同或对立，就必须记录。共识必须至少有两位专家在发言中明确表达认同；立场标签相同本身不算认同，但 supplement 若明确接着对方观点往下补，通常说明认同对方前提，可以与原发言共同构成共识。rebut 或明确说“不同意”构成分歧；分歧必须至少包含两位立场明确不同的专家。围绕同一问题的同一对专家反复交锋时，使用已有 ref 更新同一条分歧，不新建重复条目。只有双方都明确靠拢时 resolved 才能为 true。主持人不能作为参与者。evidence 可引用最近发言窗口或本次新增发言中任何真实 seq，不限于新增发言；不能编造。
+  const system = `你是节目实时字幕编辑，只返回新增或变化的共识与分歧，不重复未变化条目。宁缺毋滥：只有明确的认同或明确的对立才记录；一旦发言明确表达认同或对立，就必须记录。共识必须至少有两位专家在发言中明确表达认同；立场标签相同本身不算认同。局部共识可以与同一议题中的分歧并存，不要因整体议题仍有分歧而省略局部认同。每条 supplement 都要检查是否明确承接上一位专家认可的前提或方案后再增加条件；若明确承接，就记录双方共同认可的有限前提，并引用双方真实发言 seq。认同一个前提不代表认同对方所有结论。rebut 或明确说“不同意”构成分歧；分歧必须至少包含两位立场明确不同的专家。若同一批真实发言同时支持局部共识和分歧，两类都应记录。围绕同一问题的同一对专家反复交锋时，使用已有 ref 更新同一条分歧，不新建重复条目；不同争点分别记录，但不得为达到条数而拆分或制造洞察。只有双方都明确靠拢时 resolved 才能为 true。主持人不能作为参与者。evidence 可引用最近发言窗口或本次新增发言中任何真实 seq，不限于新增发言；不能编造。
 只输出 JSON，不加解释或 Markdown。结构为 {"consensus":[{"ref":"C1或null","content":"最多80字的一句概括","participants":["E1","E2"],"evidence":[1,2]}],"divergences":[{"ref":"D1或null","content":"最多80字的一句概括","stances":[{"who":"E1","position":"最多40字"},{"who":"E2","position":"最多40字"}],"evidence":[1,2],"resolved":false}]}。所有字段必须存在；没有新增条目时对应数组为空。`;
   const user = `话题：${topicBlock(topic)}
 别名表：${context.aliasTable.join('；') || '（暂无专家别名）'}
@@ -649,7 +691,7 @@ export function buildSummaryPrompt(
     ...discussionContext(input),
     transcriptWindow: summaryTranscriptWindow(input.transcriptWindow)
   };
-  const system = `你是中文圆桌节目的主持人。根据话题、洞察区和全程真实发言，写3至4段自然、口语化的主持人收尾。回顾讨论走向，点名主要观点和专家姓名，指出最关键的交锋，留下开放问题并致谢。共识与分歧以洞察区为准；洞察区没有的内容，不要说成“大家都同意”或“已形成共识”，可以表述为某位专家的观点或尚待讨论的问题。只引用发言记录中真实出现的内容；对未在发言记录中发言的嘉宾，不得写成“提到”“认为”“指出”等归属，可以把问题留给该嘉宾。只有洞察区明确存在共识条目时，才能使用“双方都承认”“大家都同意”或同义的共识表述；角色卡中的立场不代表实际发言。不要写“目前尚无已确认的共识”这类说明性语句。只陈述上下文支持的内容，不虚构数字、报告或机构。
+  const system = `你是中文圆桌节目的主持人。根据话题、洞察区和全程真实发言，写3至4段自然、口语化的主持人收尾。回顾讨论走向，点名主要观点和专家姓名，指出最关键的交锋，留下开放问题并致谢。共识与分歧以洞察区为准；洞察区没有的内容，不要说成“大家都同意”或“已形成共识”，可以表述为某位专家的观点或尚待讨论的问题。只引用发言记录中真实出现的内容；对未在发言记录中发言的嘉宾，不得写成“提到”“认为”“指出”等归属，可以把问题留给该嘉宾。只有洞察区明确存在共识条目时，才能使用“双方都承认”“大家都同意”或同义的共识表述；不得用“几位/所有嘉宾都承认、都认为”“各方一致认为”等措辞，把洞察区没有的局部共识推断出来；应分别描述各位专家真实表达的观点。角色卡中的立场不代表实际发言。不要写“目前尚无已确认的共识”这类说明性语句。只陈述上下文支持的内容，不虚构数字、报告或机构。
 严禁输出 JSON、列表、表格、Markdown 标题、代码块或姓名前缀。段落之间空一行。`;
   const user = `话题：${topicBlock(context.topic)}
 阵容名册：

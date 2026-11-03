@@ -541,12 +541,14 @@ describe('createMockProvider', () => {
 
     const differentStance = await makeBid('E1', 'E2', 'bid-different');
     const sameStance = await makeBid('E1', 'E4', 'bid-same');
+    const cautiousAgainstSupport = await makeBid('E1', 'E3', 'bid-cautious');
     const hostRelation = await makeBid('E1', 'H', 'bid-host');
     const justSpoke = await makeBid('E1', 'E1', 'bid-just-spoke');
     const addressed = await makeBid('E1', 'E1', 'bid-addressed', true);
 
     expect(['rebut', 'interrupt']).toContain(differentStance.intent);
     expect(sameStance.intent).toBe('supplement');
+    expect(cautiousAgainstSupport.intent).toBe('raise_hand');
     expect(hostRelation.intent).toBe('raise_hand');
     expect(justSpoke.wantToSpeak).toBe(false);
     expect(justSpoke.urgency).toBeLessThanOrEqual(0.5);
@@ -643,15 +645,32 @@ describe('createMockProvider', () => {
       action: 'opening',
       targetAlias: null
     });
-    const opening = await provider.complete(
-      request('host', openingPrompt.context, 'host-roster')
-    );
-    for (const guest of fuelRoster.filter(({ alias }) => alias !== 'H')) {
-      expect(opening.text).toContain(guest.name);
-      expect(opening.text).toContain(guest.profession);
+    const openings: string[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      openings.push(
+        (
+          await provider.complete(
+            request('host', openingPrompt.context, 'host-roster')
+          )
+        ).text
+      );
     }
-    expect(opening.text).toMatch(/先请沈清和|邀请大家先亮出判断/u);
-    expect(opening.text.split(/[。！？]/u).filter(Boolean).length).toBeLessThanOrEqual(3);
+    for (const opening of openings) {
+      for (const guest of fuelRoster.filter(({ alias }) => alias !== 'H')) {
+        expect(opening).toContain(guest.name);
+        expect(opening).toContain(guest.profession);
+        const escapedName = guest.name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+        expect(opening).not.toMatch(
+          new RegExp(
+            `(?:先请|先由|先让)${escapedName}|${escapedName}(?:先从|先说|先谈|先发言)`,
+            'u'
+          )
+        );
+      }
+      expect(opening).toMatch(/请各位/u);
+      expect(opening).not.toMatch(/先从第一位嘉宾/u);
+      expect(opening.split(/[。！？]/u).filter(Boolean).length).toBeLessThanOrEqual(3);
+    }
 
     const followPrompt = buildHostPrompt({
       ...fuelDiscussion(transcript),

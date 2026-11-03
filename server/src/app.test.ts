@@ -29,7 +29,8 @@ function createAppDeps(config: ReturnType<typeof loadConfig>, db: DatabaseSync) 
     publish: (event: StreamEvent) => ({ event, seq: null }),
     subscribe: () => () => undefined,
     viewerCount: () => 0,
-    closeDiscussion: () => undefined
+    closeDiscussion: () => undefined,
+    closeAll: () => undefined
   };
   const manager: DiscussionManager = {
     start: (_discussionId: string): Discussion | null => null,

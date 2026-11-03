@@ -688,6 +688,7 @@ async function scheduleNoBidFallback(
     expertTurnsSinceHost: state.expertTurnsSinceHost,
     noBidders: true,
     turnCount: state.turnCount,
+    maxTurns: Number.MAX_SAFE_INTEGER,
     expertCount: state.participants.filter(({ role }) => role === 'expert')
       .length,
     insights: state.insights

@@ -24,6 +24,16 @@ export function append(
   discussionId: string,
   event: StreamEvent
 ): number {
+  return withTransaction(database, () =>
+    appendInTransaction(database, discussionId, event)
+  );
+}
+
+export function appendInTransaction(
+  database: DatabaseSync,
+  discussionId: string,
+  event: StreamEvent
+): number {
   const validatedEvent = StreamEventSchema.parse(event);
   if (validatedEvent.discussionId !== discussionId) {
     throw new Error('Event discussionId does not match append scope');
@@ -32,32 +42,30 @@ export function append(
     throw new Error('Only durable events can be appended');
   }
 
-  return withTransaction(database, () => {
-    const row = database
-      .prepare(
-        `SELECT COALESCE(MAX(seq), 0) AS maxSeq
-           FROM events
-          WHERE discussion_id = ?`
-      )
-      .get(discussionId) as { maxSeq: number } | undefined;
-    const seq = (row?.maxSeq ?? 0) + 1;
+  const row = database
+    .prepare(
+      `SELECT COALESCE(MAX(seq), 0) AS maxSeq
+         FROM events
+        WHERE discussion_id = ?`
+    )
+    .get(discussionId) as { maxSeq: number } | undefined;
+  const seq = (row?.maxSeq ?? 0) + 1;
 
-    database
-      .prepare(
-        `INSERT INTO events (
-          discussion_id, seq, type, payload, created_at
-        ) VALUES (?, ?, ?, ?, ?)`
-      )
-      .run(
-        discussionId,
-        seq,
-        validatedEvent.type,
-        JSON.stringify(validatedEvent),
-        validatedEvent.at
-      );
+  database
+    .prepare(
+      `INSERT INTO events (
+        discussion_id, seq, type, payload, created_at
+      ) VALUES (?, ?, ?, ?, ?)`
+    )
+    .run(
+      discussionId,
+      seq,
+      validatedEvent.type,
+      JSON.stringify(validatedEvent),
+      validatedEvent.at
+    );
 
-    return seq;
-  });
+  return seq;
 }
 
 export function listSince(

@@ -10,6 +10,7 @@ export interface InsertUtteranceInput {
   act: SpeechAct;
   replyToParticipantId: string | null;
   content: string;
+  createdAt?: string;
 }
 
 export function insert(
@@ -18,7 +19,7 @@ export function insert(
   input: InsertUtteranceInput
 ): Utterance {
   const id = input.id ?? randomUUID();
-  const createdAt = new Date().toISOString();
+  const createdAt = input.createdAt ?? new Date().toISOString();
   const result = database
     .prepare(
       `INSERT INTO utterances (

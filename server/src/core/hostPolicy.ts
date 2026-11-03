@@ -13,6 +13,7 @@ export interface HostPolicyContext {
   expertTurnsSinceHost: number;
   noBidders: boolean;
   turnCount: number;
+  maxTurns: number;
   expertCount: number;
   insights: readonly Insight[];
 }
@@ -37,6 +38,10 @@ function pickLeastSpoken(
 
 export function decideHostAction(ctx: HostPolicyContext): HostDecision {
   const experts = ctx.participants.filter(({ role }) => role === 'expert');
+
+  if (ctx.turnCount >= ctx.maxTurns - 1) {
+    return { action: 'experts' };
+  }
 
   if (ctx.noBidders) {
     const target = pickLeastSpoken(experts);

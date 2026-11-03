@@ -1,4 +1,5 @@
 import express, { type ErrorRequestHandler } from 'express';
+import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AppConfig } from './config';
 import type { DiscussionEventBus } from './engine/eventBus';
@@ -30,26 +31,42 @@ export function createApp(deps: {
     });
   });
 
-  app.use('/api/discussions', (request, response, next) => {
-    const routeDeps = {
-      config,
-      db: deps.db,
-      llm: deps.llm,
-      bus: deps.bus,
-      manager: deps.manager
-    };
-    const router = request.path.endsWith('/stream')
-      ? createStreamRouter({ db: deps.db, bus: deps.bus })
-      : createDiscussionsRouter(routeDeps);
-    return router(request, response, next);
-  });
+  app.use('/api/discussions', createDiscussionsRouter(deps));
+  app.use(
+    '/api/discussions',
+    createStreamRouter({ db: deps.db, bus: deps.bus })
+  );
 
   const errorHandler: ErrorRequestHandler = (
-    _error,
+    error: unknown,
     _request,
     response,
     _next
   ) => {
+    if (error instanceof z.ZodError) {
+      response.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: error.issues[0]?.message ?? '请求参数无效'
+        }
+      });
+      return;
+    }
+    if (
+      error instanceof SyntaxError &&
+      typeof error === 'object' &&
+      error !== null &&
+      'type' in error &&
+      error.type === 'entity.parse.failed'
+    ) {
+      response.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: '请求体 JSON 格式无效'
+        }
+      });
+      return;
+    }
     response.status(500).json({
       error: {
         code: 'INTERNAL',

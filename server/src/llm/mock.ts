@@ -362,6 +362,37 @@ function isExpertAlias(value: unknown): value is string {
   return typeof value === 'string' && /^E\d+$/u.test(value);
 }
 
+function mockStanceRelation(previousTag: string, currentTag: string): string {
+  const direction = (tag: string): 'supportive' | 'opposed' | 'neutral' | 'unknown' => {
+    const normalized = tag.trim();
+    if (/(?:反对|不支持|不赞成|不认同|否定)/u.test(normalized)) {
+      return 'opposed';
+    }
+    if (/(?:支持|赞成|认同|认可|赞同|看好|乐观)/u.test(normalized)) {
+      return 'supportive';
+    }
+    if (/(?:中立|观望|谨慎|审慎|保留)/u.test(normalized)) {
+      return 'neutral';
+    }
+    return 'unknown';
+  };
+  const previousDirection = direction(previousTag);
+  const currentDirection = direction(currentTag);
+  if (previousDirection === 'unknown' || currentDirection === 'unknown') {
+    return '方向不明';
+  }
+  if (previousDirection === currentDirection) {
+    return '方向相同';
+  }
+  if (
+    (previousDirection === 'supportive' && currentDirection === 'opposed') ||
+    (previousDirection === 'opposed' && currentDirection === 'supportive')
+  ) {
+    return '方向相反';
+  }
+  return '一方中立或谨慎';
+}
+
 function topicProfiles(topic: string): SpeakerProfile[] {
   if (/程序|编程|开发|代码|软件/u.test(topic)) {
     return [
@@ -705,7 +736,6 @@ const UTTERANCE_TEMPLATES: Record<
 interface HostTemplateData {
   topic: string;
   guestList: string;
-  firstGuestName: string;
   targetName: string;
   profession: string;
   quote: string;
@@ -718,12 +748,12 @@ const HOST_TEMPLATES: Record<
   readonly TextTemplate<HostTemplateData>[]
 > = {
   opening: [
-    ({ topic, guestList, firstGuestName }) =>
-      `今天讨论${topic}。嘉宾有：${guestList}。先请${firstGuestName}从自己的立场说起。`,
+    ({ topic, guestList }) =>
+      `今天讨论${topic}。嘉宾有：${guestList}。请各位从自己的观察说起。`,
     ({ topic, guestList }) =>
       `今天的话题是${topic}。到场嘉宾依次是：${guestList}。请各位先亮出判断。`,
     ({ topic, guestList }) =>
-      `我们围绕${topic}展开讨论。现场嘉宾是：${guestList}。先从第一位嘉宾的观察开始。`,
+      `我们围绕${topic}展开讨论。现场嘉宾是：${guestList}。请各位从最关心的问题谈起。`,
     ({ topic, guestList }) =>
       `今天聚焦${topic}。欢迎${guestList}。我们先请各位简要说说判断。`
   ],
@@ -799,9 +829,7 @@ function buildBid(
     (previousAlias === 'H'
       ? '主持人发言'
       : previousSpeaker
-        ? previousSpeaker.stanceTag === speaker.stanceTag
-          ? '相同'
-          : '不同'
+        ? mockStanceRelation(previousSpeaker.stanceTag, speaker.stanceTag)
         : '暂无上一条发言');
   const addressed =
     context.addressed === true ||
@@ -816,9 +844,9 @@ function buildBid(
   const proposedIntent =
     relation === '主持人发言'
       ? 'raise_hand'
-      : relation === '相同'
+      : relation === '方向相同' || relation === '相同'
         ? 'supplement'
-        : relation === '不同'
+        : relation === '方向相反' || relation === '不同'
           ? interruptOdds < 0.16
             ? 'interrupt'
             : 'rebut'
@@ -967,12 +995,9 @@ function buildHost(
     .filter(({ alias }) => alias !== 'H')
     .map(({ name, profession, title }) => `${name}（${profession} · ${title}）`)
     .join('、');
-  const firstGuestName =
-    roster.find(({ alias }) => alias !== 'H')?.name ?? '各位嘉宾';
   const data: HostTemplateData = {
     topic,
     guestList: guestList || '嘉宾名单待提供',
-    firstGuestName,
     targetName: target?.name ?? '这位嘉宾',
     profession: target?.profession ?? '专业领域',
     quote:

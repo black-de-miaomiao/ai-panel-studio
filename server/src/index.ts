@@ -1,6 +1,6 @@
 import { createApp } from './app';
 import { describeConfig, loadConfig, loadDotEnv } from './config';
-import { openDatabase } from './db/connection';
+import { initSchema, openDatabase, seedIfEmpty } from './db/connection';
 import { createEventBus } from './engine/eventBus';
 import { DiscussionManager } from './engine/manager';
 import { createLLMGateway } from './llm/gateway';
@@ -10,6 +10,8 @@ import { createOpenAICompatibleProvider } from './llm/openaiCompatible';
 loadDotEnv();
 const config = loadConfig();
 const database = openDatabase(config.databasePath);
+initSchema(database);
+seedIfEmpty(database);
 const provider =
   config.llm.provider === 'mock'
     ? createMockProvider({
@@ -39,27 +41,25 @@ const manager = new DiscussionManager(
 manager.recoverOnBoot();
 const app = createApp({ config, db: database, llm, bus, manager });
 const server = app.listen(config.port, '127.0.0.1', () => {
-  console.info(`AI Panel Studio server listening at http://127.0.0.1:${config.port}`);
-  console.info(describeConfig(config));
+  console.info(JSON.stringify(describeConfig(config)));
 });
 
 let isShuttingDown = false;
 
-function shutdown(signal: NodeJS.Signals): void {
+function shutdown(): void {
   if (isShuttingDown) {
     return;
   }
   isShuttingDown = true;
-  console.info(`${signal} received; closing server`);
+  manager.stopAll();
 
   server.close((error) => {
     if (error) {
-      console.error('Failed to close HTTP server', error);
       process.exitCode = 1;
     }
     database.close();
   });
 }
 
-process.once('SIGINT', () => shutdown('SIGINT'));
-process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);

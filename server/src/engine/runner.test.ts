@@ -143,6 +143,14 @@ function collectEvents(
   return bus.subscribe(id, (event) => events.push(event));
 }
 
+function createDeferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   database = createTestDb();
 });
@@ -178,6 +186,94 @@ describe('DiscussionRunner', () => {
     );
     expect(statuses).toContain('summarizing');
     expect(statuses.at(-1)).toBe('ended');
+  });
+
+  it('最后一轮无人出价时直接安排专家完成正文', async () => {
+    const { runner, id } = makeRunner({
+      maxTurns: 1,
+      wrapProvider: (provider) => ({
+        ...provider,
+        async complete(request) {
+          if (request.task === 'bid') {
+            return {
+              text: JSON.stringify({
+                wantToSpeak: false,
+                intent: 'raise_hand',
+                urgency: 0.2,
+                replyTo: null,
+                focus: null
+              })
+            };
+          }
+          return provider.complete(request);
+        }
+      })
+    });
+    runner.start();
+    await runner.done;
+
+    const participants = new Map(
+      listParticipants(database, id).map((participant) => [
+        participant.id,
+        participant
+      ])
+    );
+    const body = listUtterances(database, id).filter(
+      ({ act }) => act !== 'opening' && act !== 'closing'
+    );
+
+    expect(body).toHaveLength(1);
+    expect(participants.get(body[0]!.participantId)?.role).toBe('expert');
+    expect(body[0]?.act).toBe('statement');
+  });
+
+  it('每条正文发言后持久化递增轮次且更新时间与状态事件一致', async () => {
+    const { runner, bus, id } = makeRunner({ maxTurns: 4 });
+    const events: Array<{ event: StreamEvent; seq: number | null }> = [];
+    const statusTimestamps: Array<{
+      turnCount: number;
+      at: string;
+      updatedAt: string | undefined;
+    }> = [];
+    const unsubscribe = bus.subscribe(id, (envelope) => {
+      events.push(envelope);
+      if (
+        envelope.event.type === 'discussion.status' &&
+        envelope.event.turnCount > 0
+      ) {
+        statusTimestamps.push({
+          turnCount: envelope.event.turnCount,
+          at: envelope.event.at,
+          updatedAt: getById(database, id)?.updatedAt
+        });
+      }
+    });
+    runner.start();
+    await runner.done;
+    unsubscribe();
+
+    const body = listUtterances(database, id).filter(
+      ({ act }) => act !== 'opening' && act !== 'closing'
+    );
+    expect(body).toHaveLength(4);
+    for (const [index, utterance] of body.entries()) {
+      const completed = events.find(
+        ({ event }) =>
+          event.type === 'utterance.completed' &&
+          event.utterance.id === utterance.id
+      );
+      expect(completed?.event.type).toBe('utterance.completed');
+      if (!completed || completed.event.type !== 'utterance.completed') {
+        throw new Error('正文发言缺少完成事件');
+      }
+      const turn = index + 1;
+      const status = statusTimestamps.find(
+        ({ turnCount, at }) =>
+          turnCount === turn && at === completed.event.at
+      );
+      expect(status?.at).toBe(completed.event.at);
+      expect(status?.updatedAt).toBe(completed.event.at);
+    }
   });
 
   it('连续两条专家发言不会由同一专家完成', async () => {
@@ -275,6 +371,174 @@ describe('DiscussionRunner', () => {
     expect(() => JSON.parse(summary)).toThrow();
   });
 
+  it('总结首段在模型流结束前推送且同步 liveUtterance', async () => {
+    const releaseStream = createDeferred();
+    let streamFinished = false;
+    const { runner, bus, id } = makeRunner({
+      maxTurns: 2,
+      wrapProvider: (provider) => ({
+        ...provider,
+        async *stream(request) {
+          if (request.task !== 'summary') {
+            yield* provider.stream(request);
+            return;
+          }
+          yield '摘要先行字幕';
+          await releaseStream.promise;
+          yield '后续内容。';
+          streamFinished = true;
+        }
+      })
+    });
+    const events: Array<{ event: StreamEvent; seq: number | null }> = [];
+    const unsubscribe = collectEvents(bus, id, events);
+    runner.start();
+    const done = runner.done;
+
+    try {
+      await waitFor(
+        () => {
+          const started = events.find(
+            ({ event }) =>
+              event.type === 'utterance.started' && event.act === 'closing'
+          );
+          const startedId =
+            started?.event.type === 'utterance.started'
+              ? started.event.utteranceId
+              : null;
+          return Boolean(
+            startedId &&
+              events.some(
+                ({ event }) =>
+                  event.type === 'utterance.delta' &&
+                  event.utteranceId === startedId
+              )
+          );
+        },
+        5_000
+      );
+      const started = events.find(
+        ({ event }) =>
+          event.type === 'utterance.started' && event.act === 'closing'
+      );
+      expect(started?.event.type).toBe('utterance.started');
+      if (!started || started.event.type !== 'utterance.started') {
+        throw new Error('总结缺少开始事件');
+      }
+      expect(streamFinished).toBe(false);
+      expect(runner.getLiveUtterance()?.utteranceId).toBe(
+        started.event.utteranceId
+      );
+      expect(runner.getLiveUtterance()?.text).toContain('摘要先行字幕');
+    } finally {
+      releaseStream.resolve();
+      await done;
+      unsubscribe();
+    }
+  });
+
+  it('总结以 JSON 对象开头时不推送该次内容并采用重试结果', async () => {
+    let summaryAttempts = 0;
+    const { runner, bus, id } = makeRunner({
+      maxTurns: 2,
+      wrapProvider: (provider) => ({
+        ...provider,
+        async *stream(request) {
+          if (request.task !== 'summary') {
+            yield* provider.stream(request);
+            return;
+          }
+          summaryAttempts += 1;
+          if (summaryAttempts === 1) {
+            yield '{"summary":"不得展示"}';
+            return;
+          }
+          yield '采用重试结果。';
+        }
+      })
+    });
+    const events: Array<{ event: StreamEvent; seq: number | null }> = [];
+    const unsubscribe = collectEvents(bus, id, events);
+    runner.start();
+    await runner.done;
+    unsubscribe();
+
+    const closingStarts = events.flatMap(({ event }) =>
+      event.type === 'utterance.started' && event.act === 'closing'
+        ? [event]
+        : []
+    );
+    expect(summaryAttempts).toBe(2);
+    expect(closingStarts).toHaveLength(1);
+    const closingStart = closingStarts[0];
+    if (!closingStart) {
+      throw new Error('总结缺少开始事件');
+    }
+    const summaryDeltas = events.flatMap(({ event }) =>
+      event.type === 'utterance.delta' &&
+      event.utteranceId === closingStart.utteranceId
+        ? [event.delta]
+        : []
+    );
+    expect(summaryDeltas.join('')).toBe('采用重试结果。');
+    expect(getById(database, id)?.summary).toBe('采用重试结果。');
+    expect(listUtterances(database, id).at(-1)?.content).toBe(
+      '采用重试结果。'
+    );
+  });
+
+  it('总结中途失败后重试使用新 utteranceId 且持久化仅含成功全文', async () => {
+    let summaryAttempts = 0;
+    const { runner, bus, id } = makeRunner({
+      maxTurns: 2,
+      wrapProvider: (provider) => ({
+        ...provider,
+        async *stream(request) {
+          if (request.task !== 'summary') {
+            yield* provider.stream(request);
+            return;
+          }
+          summaryAttempts += 1;
+          if (summaryAttempts === 1) {
+            yield '失败尝试的部分内容';
+            throw new Error('中途断线');
+          }
+          yield '重试成功的总结。';
+        }
+      })
+    });
+    const events: Array<{ event: StreamEvent; seq: number | null }> = [];
+    const unsubscribe = collectEvents(bus, id, events);
+    runner.start();
+    await runner.done;
+    unsubscribe();
+
+    const closingStarts = events.flatMap(({ event }) =>
+      event.type === 'utterance.started' && event.act === 'closing'
+        ? [event]
+        : []
+    );
+    expect(summaryAttempts).toBe(2);
+    expect(closingStarts).toHaveLength(2);
+    expect(closingStarts[0]?.utteranceId).not.toBe(
+      closingStarts[1]?.utteranceId
+    );
+    const completed = events.find(
+      ({ event }) =>
+        event.type === 'utterance.completed' &&
+        event.utterance.act === 'closing'
+    );
+    expect(completed?.event.type).toBe('utterance.completed');
+    if (!completed || completed.event.type !== 'utterance.completed') {
+      throw new Error('总结缺少完成事件');
+    }
+    expect(completed.event.utterance.id).toBe(
+      closingStarts[1]?.utteranceId
+    );
+    expect(completed.event.utterance.content).toBe('重试成功的总结。');
+    expect(getById(database, id)?.summary).toBe('重试成功的总结。');
+  });
+
   it('模型总结返回 JSON 时不展示 JSON 原文而保存自然语言总结', async () => {
     const { runner, id } = makeRunner({
       maxTurns: 4,
@@ -288,19 +552,47 @@ describe('DiscussionRunner', () => {
     expect(() => JSON.parse(summary)).toThrow();
   });
 
-  it('总结连续失败时根据讨论内容生成自然语言兜底总结', async () => {
-    const { runner, id, getSummaryCalls } = makeRunner({
+  it('总结连续失败时兜底发言按开始、delta、完成、总结完成的顺序发布', async () => {
+    const { runner, bus, id, getSummaryCalls } = makeRunner({
       maxTurns: 4,
       failSummary: true
     });
+    const events: Array<{ event: StreamEvent; seq: number | null }> = [];
+    const unsubscribe = collectEvents(bus, id, events);
     runner.start();
     await runner.done;
+    unsubscribe();
     const summary = getById(database, id)?.summary ?? '';
 
     expect(getSummaryCalls()).toBeGreaterThanOrEqual(2);
     expect(summary.trim().length).toBeGreaterThan(0);
     expect(summary.trimStart()).not.toMatch(/^(?:\{|\[)/);
     expect(() => JSON.parse(summary)).toThrow();
+    const closingStartedIndex = events.findIndex(
+      ({ event }) =>
+        event.type === 'utterance.started' && event.act === 'closing'
+    );
+    const closingStarted = events[closingStartedIndex]?.event;
+    expect(closingStarted?.type).toBe('utterance.started');
+    if (!closingStarted || closingStarted.type !== 'utterance.started') {
+      throw new Error('兜底总结缺少开始事件');
+    }
+    const deltaIndex = events.findIndex(
+      ({ event }) =>
+        event.type === 'utterance.delta' &&
+        event.utteranceId === closingStarted.utteranceId
+    );
+    const completedIndex = events.findIndex(
+      ({ event }) =>
+        event.type === 'utterance.completed' &&
+        event.utterance.id === closingStarted.utteranceId
+    );
+    const summaryCompletedIndex = events.findIndex(
+      ({ event }) => event.type === 'summary.completed'
+    );
+    expect(closingStartedIndex).toBeLessThan(deltaIndex);
+    expect(deltaIndex).toBeLessThan(completedIndex);
+    expect(completedIndex).toBeLessThan(summaryCompletedIndex);
   });
 
   it('每条完成事件之前先有同 ID 的开始事件且 speaking 只标记当前发言人', async () => {

@@ -66,40 +66,48 @@ export function replaceLineup(
   discussionId: string,
   drafts: readonly ParticipantDraft[]
 ): Participant[] {
-  withTransaction(database, () => {
-    database
-      .prepare('DELETE FROM participants WHERE discussion_id = ?')
-      .run(discussionId);
-
-    const insert = database.prepare(
-      `INSERT INTO participants (
-        id, discussion_id, role, seat, name, profession, title, stance,
-        stance_tag, persona, color, avatar, agent_state, agent_intent, focus,
-        speak_count, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', NULL, NULL, 0, ?)`
-    );
-    const createdAt = new Date().toISOString();
-
-    for (const draft of drafts) {
-      insert.run(
-        draft.id ?? randomUUID(),
-        discussionId,
-        draft.role,
-        draft.seat,
-        draft.name,
-        draft.profession,
-        draft.title,
-        draft.stance,
-        draft.stanceTag,
-        draft.persona,
-        draft.color,
-        draft.avatar,
-        createdAt
-      );
-    }
-  });
+  withTransaction(database, () =>
+    replaceLineupInTransaction(database, discussionId, drafts)
+  );
 
   return listByDiscussion(database, discussionId);
+}
+
+export function replaceLineupInTransaction(
+  database: DatabaseSync,
+  discussionId: string,
+  drafts: readonly ParticipantDraft[],
+  createdAt = new Date().toISOString()
+): void {
+  database
+    .prepare('DELETE FROM participants WHERE discussion_id = ?')
+    .run(discussionId);
+
+  const insert = database.prepare(
+    `INSERT INTO participants (
+      id, discussion_id, role, seat, name, profession, title, stance,
+      stance_tag, persona, color, avatar, agent_state, agent_intent, focus,
+      speak_count, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', NULL, NULL, 0, ?)`
+  );
+
+  for (const draft of drafts) {
+    insert.run(
+      draft.id ?? randomUUID(),
+      discussionId,
+      draft.role,
+      draft.seat,
+      draft.name,
+      draft.profession,
+      draft.title,
+      draft.stance,
+      draft.stanceTag,
+      draft.persona,
+      draft.color,
+      draft.avatar,
+      createdAt
+    );
+  }
 }
 
 export function updateAgentState(

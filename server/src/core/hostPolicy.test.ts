@@ -52,6 +52,7 @@ function context(
     expertTurnsSinceHost: 0,
     noBidders: false,
     turnCount: 0,
+    maxTurns: 8,
     expertCount: 4,
     insights: [],
     ...overrides
@@ -188,5 +189,19 @@ describe('decideHostAction', () => {
         })
       )
     ).toEqual({ action: 'invite', targetParticipantId: 'e2' });
+  });
+
+  it('只剩最后一轮正文时无论是否无人出价都不安排主持人动作', () => {
+    expect(
+      decideHostAction(
+        context({
+          turnCount: 7,
+          maxTurns: 8,
+          noBidders: true,
+          expertTurnsSinceHost: HOST_INTERVAL,
+          insights: [divergence('active', 10, ['e2', 'e3'])]
+        })
+      )
+    ).toEqual({ action: 'experts' });
   });
 });

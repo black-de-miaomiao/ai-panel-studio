@@ -146,10 +146,11 @@ export function updateStatus(
   database: DatabaseSync,
   id: string,
   status: DiscussionStatus,
-  patch: DiscussionStatusPatch = {}
+  patch: DiscussionStatusPatch = {},
+  updatedAt = nowIso()
 ): Discussion | null {
   const assignments = ['status = ?', 'updated_at = ?'];
-  const parameters: Array<string | null> = [status, nowIso()];
+  const parameters: Array<string | null> = [status, updatedAt];
 
   if (Object.hasOwn(patch, 'startedAt')) {
     assignments.push('started_at = ?');
@@ -177,7 +178,8 @@ export function updateStatus(
 
 export function incrementTurnCount(
   database: DatabaseSync,
-  id: string
+  id: string,
+  updatedAt = nowIso()
 ): number | null {
   database
     .prepare(
@@ -185,7 +187,7 @@ export function incrementTurnCount(
           SET turn_count = turn_count + 1, updated_at = ?
         WHERE id = ?`
     )
-    .run(nowIso(), id);
+    .run(updatedAt, id);
 
   const row = database
     .prepare('SELECT turn_count AS turnCount FROM discussions WHERE id = ?')
@@ -196,7 +198,8 @@ export function incrementTurnCount(
 export function setSummary(
   database: DatabaseSync,
   id: string,
-  summary: string
+  summary: string,
+  updatedAt = nowIso()
 ): Discussion | null {
   database
     .prepare(
@@ -204,7 +207,7 @@ export function setSummary(
           SET summary = ?, updated_at = ?
         WHERE id = ?`
     )
-    .run(summary, nowIso(), id);
+    .run(summary, updatedAt, id);
 
   return getById(database, id);
 }
@@ -217,28 +220,36 @@ export function remove(database: DatabaseSync, id: string): boolean {
 }
 
 export function markInterruptedAsPaused(database: DatabaseSync): string[] {
-  return withTransaction(database, () => {
-    const ids = database
-      .prepare(
-        `SELECT id
-           FROM discussions
-          WHERE status IN ('live', 'summarizing')
-          ORDER BY id`
-      )
-      .all() as unknown as Array<{ id: string }>;
+  const updatedAt = nowIso();
+  return withTransaction(database, () =>
+    markInterruptedAsPausedInTransaction(database, updatedAt)
+  );
+}
 
-    if (ids.length === 0) {
-      return [];
-    }
+export function markInterruptedAsPausedInTransaction(
+  database: DatabaseSync,
+  updatedAt: string
+): string[] {
+  const ids = database
+    .prepare(
+      `SELECT id
+         FROM discussions
+        WHERE status IN ('live', 'summarizing')
+        ORDER BY id`
+    )
+    .all() as unknown as Array<{ id: string }>;
 
-    database
-      .prepare(
-        `UPDATE discussions
-            SET status = 'paused', updated_at = ?
-          WHERE status IN ('live', 'summarizing')`
-      )
-      .run(nowIso());
+  if (ids.length === 0) {
+    return [];
+  }
 
-    return ids.map(({ id }) => id);
-  });
+  database
+    .prepare(
+      `UPDATE discussions
+          SET status = 'paused', updated_at = ?
+        WHERE status IN ('live', 'summarizing')`
+    )
+    .run(updatedAt);
+
+  return ids.map(({ id }) => id);
 }

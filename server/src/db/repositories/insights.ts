@@ -56,56 +56,64 @@ export function replaceAll(
   discussionId: string,
   insights: readonly Insight[]
 ): Insight[] {
+  withTransaction(database, () =>
+    replaceAllInTransaction(database, discussionId, insights)
+  );
+
+  return listByDiscussion(database, discussionId);
+}
+
+export function replaceAllInTransaction(
+  database: DatabaseSync,
+  discussionId: string,
+  insights: readonly Insight[]
+): void {
   for (const insight of insights) {
     if (insight.discussionId !== discussionId) {
       throw new Error('Insight discussionId does not match replacement scope');
     }
   }
 
-  withTransaction(database, () => {
-    database
-      .prepare('DELETE FROM insights WHERE discussion_id = ?')
-      .run(discussionId);
+  database
+    .prepare('DELETE FROM insights WHERE discussion_id = ?')
+    .run(discussionId);
 
-    const insertInsight = database.prepare(
-      `INSERT INTO insights (
-        id, discussion_id, kind, content, status, evidence_seqs,
-        updated_at_seq, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    );
-    const insertStance = database.prepare(
-      `INSERT INTO insight_stances (insight_id, participant_id, position)
-       SELECT ?, participant.id, ?
-         FROM participants AS participant
-        WHERE participant.discussion_id = ? AND participant.id = ?`
+  const insertInsight = database.prepare(
+    `INSERT INTO insights (
+      id, discussion_id, kind, content, status, evidence_seqs,
+      updated_at_seq, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const insertStance = database.prepare(
+    `INSERT INTO insight_stances (insight_id, participant_id, position)
+     SELECT ?, participant.id, ?
+       FROM participants AS participant
+      WHERE participant.discussion_id = ? AND participant.id = ?`
+  );
+
+  for (const insight of insights) {
+    insertInsight.run(
+      insight.id,
+      discussionId,
+      insight.kind,
+      insight.content,
+      insight.status,
+      JSON.stringify(insight.evidenceSeqs),
+      insight.updatedAtSeq,
+      insight.createdAt,
+      insight.updatedAt
     );
 
-    for (const insight of insights) {
-      insertInsight.run(
+    for (const stance of insight.stances) {
+      const result = insertStance.run(
         insight.id,
+        stance.position,
         discussionId,
-        insight.kind,
-        insight.content,
-        insight.status,
-        JSON.stringify(insight.evidenceSeqs),
-        insight.updatedAtSeq,
-        insight.createdAt,
-        insight.updatedAt
+        stance.participantId
       );
-
-      for (const stance of insight.stances) {
-        const result = insertStance.run(
-          insight.id,
-          stance.position,
-          discussionId,
-          stance.participantId
-        );
-        if (Number(result.changes) === 0) {
-          throw new Error('Insight stance participant is outside the discussion');
-        }
+      if (Number(result.changes) === 0) {
+        throw new Error('Insight stance participant is outside the discussion');
       }
     }
-  });
-
-  return listByDiscussion(database, discussionId);
+  }
 }

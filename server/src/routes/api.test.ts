@@ -14,44 +14,117 @@ import {
   remove as removeDiscussion,
   updateStatus
 } from '../db/repositories/discussions';
+import { listByDiscussion as listParticipants } from '../db/repositories/participants';
 import { createTestConfig, createTestDb } from '../test/helpers';
 import type { DiscussionEventBus } from '../engine/eventBus';
 import type { DiscussionManager } from '../engine/manager';
 import { createLLMGateway } from '../llm/gateway';
 import { createMockProvider } from '../llm/mock';
 import type { LLMGateway } from '../llm/gateway';
+import type { LLMProvider } from '../llm/types';
 
 const fakeApiKey = 'sk-test-not-a-real-key';
 
 let database: DatabaseSync;
 let app: ReturnType<typeof createApp>;
 
-function createTestApp(options: { failOnLineup?: boolean } = {}) {
+function createDeferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function gatewayFor(provider: LLMProvider): LLMGateway {
+  return createLLMGateway({
+    provider,
+    models: { quality: 'quality-model', fast: 'fast-model' },
+    maxConcurrency: 2
+  });
+}
+
+function createBlockedLineupGateway() {
+  const mock = createMockProvider({ latencyMs: 0, streamDelayMs: 0 });
+  const started = createDeferred();
+  const release = createDeferred();
+  let blocked = false;
+  const provider: LLMProvider = {
+    name: mock.name,
+    async complete(request) {
+      if (request.task === 'lineup' && !blocked) {
+        blocked = true;
+        started.resolve();
+        await release.promise;
+      }
+      return mock.complete(request);
+    },
+    async *stream(request) {
+      yield* mock.stream(request);
+    }
+  };
+  return {
+    gateway: gatewayFor(provider),
+    started: started.promise,
+    release: release.resolve
+  };
+}
+
+function createToggleFailureGateway() {
+  const mock = createMockProvider({ latencyMs: 0, streamDelayMs: 0 });
+  let shouldFail = true;
+  const provider: LLMProvider = {
+    name: mock.name,
+    async complete(request) {
+      if (request.task === 'lineup' && shouldFail) {
+        throw new Error('可控的阵容生成失败');
+      }
+      return mock.complete(request);
+    },
+    async *stream(request) {
+      yield* mock.stream(request);
+    }
+  };
+  return {
+    gateway: gatewayFor(provider),
+    setShouldFail(value: boolean) {
+      shouldFail = value;
+    }
+  };
+}
+
+function createTestApp(options: {
+  failOnLineup?: boolean;
+  llm?: LLMGateway;
+} = {}) {
   const config = createTestConfig({
     llm: {
       apiKey: fakeApiKey,
       provider: 'mock'
     }
   });
-  const llm: LLMGateway = createLLMGateway({
-    provider: createMockProvider({
-      latencyMs: 0,
-      streamDelayMs: 0,
-      failOn: options.failOnLineup
-        ? (llmRequest) => llmRequest.task === 'lineup'
-        : undefined
-    }),
-    models: {
-      quality: config.llm.qualityModel,
-      fast: config.llm.fastModel
-    },
-    maxConcurrency: 2
-  });
+  const llm: LLMGateway =
+    options.llm ??
+    createLLMGateway({
+      provider: createMockProvider({
+        latencyMs: 0,
+        streamDelayMs: 0,
+        failOn: options.failOnLineup
+          ? (llmRequest) => llmRequest.task === 'lineup'
+          : undefined
+      }),
+      models: {
+        quality: config.llm.qualityModel,
+        fast: config.llm.fastModel
+      },
+      maxConcurrency: 2
+    });
   const bus: DiscussionEventBus = {
     publish: (event: StreamEvent) => ({ event, seq: null }),
     subscribe: () => () => undefined,
     viewerCount: () => 0,
-    closeDiscussion: () => undefined
+    closeDiscussion: () => undefined,
+    closeAll: () => undefined
   };
   const manager: DiscussionManager = {
     start: (discussionId: string): Discussion | null => {
@@ -95,6 +168,23 @@ afterEach(() => {
 });
 
 describe('讨论 REST API', () => {
+  it('非法状态筛选和 JSON 请求体返回中文 400 错误', async () => {
+    const invalidStatus = await request(app).get(
+      '/api/discussions?status=live,unknown'
+    );
+    const malformedJson = await request(app)
+      .post('/api/discussions')
+      .set('content-type', 'application/json')
+      .send('{"topic":');
+
+    expect(invalidStatus.status).toBe(400);
+    expect(invalidStatus.body.error.code).toBe('VALIDATION_ERROR');
+    expect(invalidStatus.body.error.message).toMatch(/[\u3400-\u9fff]/);
+    expect(malformedJson.status).toBe(400);
+    expect(malformedJson.body.error.code).toBe('VALIDATION_ERROR');
+    expect(malformedJson.body.error.message).toMatch(/[\u3400-\u9fff]/);
+  });
+
   it('拒绝空话题越界长度和非法专家人数并返回中文校验错误', async () => {
     const invalidBodies = [
       { topic: '' },
@@ -313,6 +403,7 @@ describe('讨论 REST API', () => {
     const discussionId = response.body.error.details?.[0]?.discussionId as
       | string
       | undefined;
+    const statusAfterFailure = getById(database, discussionId ?? '')?.status;
     app = createTestApp();
     const regenerated = discussionId
       ? await request(app).post(
@@ -323,9 +414,132 @@ describe('讨论 REST API', () => {
     expect(response.status).toBe(502);
     expect(response.body.error.code).toBe('LLM_ERROR');
     expect(discussionId).toBeTruthy();
-    expect(getById(database, discussionId ?? '')?.status).toBe('failed');
+    expect(statusAfterFailure).toBe('failed');
     expect(regenerated?.status).toBe(200);
     expect(regenerated?.body.snapshot.discussion.status).toBe('lineup_ready');
+  });
+
+  it('阵容更新期间拒绝开播和重复更换，完成后开播保留新阵容', async () => {
+    const created = await request(app)
+      .post('/api/discussions')
+      .send({ topic: '阵容更新与开播互斥', expertCount: 2 });
+    const discussionId = created.body.snapshot.discussion.id as string;
+    const oldIds = listParticipants(database, discussionId).map(
+      ({ id }) => id
+    );
+    const gate = createBlockedLineupGateway();
+    app = createTestApp({ llm: gate.gateway });
+    const pendingRegenerate = request(app)
+      .post(`/api/discussions/${discussionId}/lineup/regenerate`)
+      .then((response) => response);
+    await gate.started;
+
+    try {
+      const blockedStart = await request(app).post(
+        `/api/discussions/${discussionId}/start`
+      );
+      const duplicateRegenerate = await request(app).post(
+        `/api/discussions/${discussionId}/lineup/regenerate`
+      );
+
+      expect(blockedStart.status).toBe(409);
+      expect(blockedStart.body.error.code).toBe('INVALID_STATE');
+      expect(blockedStart.body.error.message).toMatch(/阵容正在更新/u);
+      expect(duplicateRegenerate.status).toBe(409);
+      expect(duplicateRegenerate.body.error.code).toBe('INVALID_STATE');
+    } finally {
+      gate.release();
+    }
+
+    const regenerated = await pendingRegenerate;
+    const newIds = regenerated.body.snapshot.participants.map(
+      (participant: { id: string }) => participant.id
+    );
+    expect(regenerated.status).toBe(200);
+    expect(newIds).not.toEqual(oldIds);
+
+    const started = await request(app).post(
+      `/api/discussions/${discussionId}/start`
+    );
+    const afterStart = await request(app).get(
+      `/api/discussions/${discussionId}`
+    );
+    expect(started.status).toBe(200);
+    expect(afterStart.body.snapshot.participants.map(
+      (participant: { id: string }) => participant.id
+    )).toEqual(newIds);
+  });
+
+  it('阵容更新期间删除讨论后丢弃生成结果且不创建孤儿参与者', async () => {
+    const created = await request(app)
+      .post('/api/discussions')
+      .send({ topic: '删除时阵容仍在生成', expertCount: 2 });
+    const discussionId = created.body.snapshot.discussion.id as string;
+    const gate = createBlockedLineupGateway();
+    app = createTestApp({ llm: gate.gateway });
+    const pendingRegenerate = request(app)
+      .post(`/api/discussions/${discussionId}/lineup/regenerate`)
+      .then((response) => response);
+    await gate.started;
+
+    const deleted = await request(app).delete(
+      `/api/discussions/${discussionId}`
+    );
+    gate.release();
+    const regenerated = await pendingRegenerate;
+
+    expect(deleted.status).toBe(204);
+    expect(regenerated.status).toBe(404);
+    expect(regenerated.body.error.code).toBe('NOT_FOUND');
+    expect(getById(database, discussionId)).toBeNull();
+    expect(listParticipants(database, discussionId)).toEqual([]);
+  });
+
+  it('创建讨论生成阵容期间被删除时返回 404 且不写入参与者', async () => {
+    const gate = createBlockedLineupGateway();
+    app = createTestApp({ llm: gate.gateway });
+    const pendingCreate = request(app)
+      .post('/api/discussions')
+      .send({ topic: '创建过程中删除', expertCount: 2 })
+      .then((response) => response);
+    await gate.started;
+    const draft = listDiscussions(database, { statuses: ['draft'] })[0];
+    expect(draft).toBeTruthy();
+    if (!draft) {
+      gate.release();
+      throw new Error('创建中的讨论未进入 draft');
+    }
+
+    const deleted = await request(app).delete(`/api/discussions/${draft.id}`);
+    gate.release();
+    const created = await pendingCreate;
+
+    expect(deleted.status).toBe(204);
+    expect(created.status).toBe(404);
+    expect(created.body.error.code).toBe('NOT_FOUND');
+    expect(listParticipants(database, draft.id)).toEqual([]);
+  });
+
+  it('重新生成失败后释放互斥并允许再次尝试', async () => {
+    const created = await request(app)
+      .post('/api/discussions')
+      .send({ topic: '失败后释放阵容锁', expertCount: 2 });
+    const discussionId = created.body.snapshot.discussion.id as string;
+    const toggle = createToggleFailureGateway();
+    app = createTestApp({ llm: toggle.gateway });
+
+    const failed = await request(app).post(
+      `/api/discussions/${discussionId}/lineup/regenerate`
+    );
+    expect(failed.status).toBe(502);
+    expect(getById(database, discussionId)?.status).toBe('failed');
+
+    toggle.setShouldFail(false);
+    const retried = await request(app).post(
+      `/api/discussions/${discussionId}/lineup/regenerate`
+    );
+    expect(retried.status).toBe(200);
+    expect(retried.body.snapshot.discussion.status).toBe('lineup_ready');
   });
 
   it('健康检查与 REST 响应中不泄漏配置的假密钥', async () => {
