@@ -1,4 +1,5 @@
 import type { LLMProvider, LLMRequest } from './types';
+import { createRng } from '../core/rng';
 
 interface SpeakerProfile {
   name: string;
@@ -16,9 +17,35 @@ interface MockContext extends Record<string, unknown> {
   replyToAlias?: string | null;
   action?: string;
   act?: string;
-  transcriptWindow?: string;
+  transcriptWindow?: unknown;
   recentTranscript?: unknown;
   newUtterances?: unknown;
+  roster?: unknown;
+  speaker?: unknown;
+  previousUtterance?: unknown;
+  targetAlias?: string | null;
+  addressed?: boolean;
+  insightsText?: string;
+  existingInsightsText?: string;
+  divergence?: unknown;
+}
+
+interface MockRosterEntry {
+  alias: string;
+  name: string;
+  profession: string;
+  title: string;
+  stanceTag: string;
+  stance: string;
+}
+
+interface MockTranscriptEntry {
+  seq: number;
+  speakerAlias: string;
+  speakerName: string;
+  act: string;
+  replyToAlias: string | null;
+  content: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -33,6 +60,215 @@ function readString(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback;
 }
 
+function topicCore(topic: string): string {
+  const normalized = topic
+    .trim()
+    .replace(/[。！!？?；;：:]+$/gu, '');
+  if (Array.from(normalized).length <= 24) {
+    return normalized || '本场议题';
+  }
+  const firstClause = normalized.split(/[，,。！？!?；;：:]/u)[0]?.trim();
+  return firstClause || normalized || '本场议题';
+}
+
+const STANCE_PREFIX = /^(?:有条件支持|支持|担心|认为|反对|主张|倾向)/u;
+
+function sentencePoint(value: string): string {
+  const compact = value.replace(/\s+/gu, ' ').trim();
+  const point =
+    compact.split(/[，,。！？!?；;：:]/u)[0]?.trim() || '结合实际条件判断';
+  return STANCE_PREFIX.test(point) ? point : `认为${point}`;
+}
+
+function longestCommonSubstring(left: string, right: string): string {
+  const leftCharacters = Array.from(left);
+  const rightCharacters = Array.from(right);
+  let previous = Array<number>(rightCharacters.length + 1).fill(0);
+  let bestLength = 0;
+  let bestEnd = 0;
+
+  for (let leftIndex = 1; leftIndex <= leftCharacters.length; leftIndex += 1) {
+    const current = Array<number>(rightCharacters.length + 1).fill(0);
+    for (
+      let rightIndex = 1;
+      rightIndex <= rightCharacters.length;
+      rightIndex += 1
+    ) {
+      if (leftCharacters[leftIndex - 1] === rightCharacters[rightIndex - 1]) {
+        current[rightIndex] = previous[rightIndex - 1]! + 1;
+        if (current[rightIndex]! > bestLength) {
+          bestLength = current[rightIndex]!;
+          bestEnd = leftIndex;
+        }
+      }
+    }
+    previous = current;
+  }
+  return leftCharacters.slice(bestEnd - bestLength, bestEnd).join('');
+}
+
+function shortQuote(
+  value: string,
+  target: MockRosterEntry,
+  roster: readonly MockRosterEntry[],
+  topic: string
+): string {
+  const boilerplate = [
+    '我的判断是',
+    '我更关注',
+    '我关注',
+    '我担心',
+    '我认为',
+    '我支持',
+    '我反对',
+    '我主张',
+    '围绕',
+    '关于',
+    '对',
+    '就',
+    '你提到',
+    '刚才提到',
+    '刚才说',
+    '刚才的',
+    '提到',
+    '回应',
+    '接着',
+    '顺着',
+    '等一下',
+    '先停一下',
+    '我想立即回应',
+    '我得立即回应',
+    '当场回应',
+    '具体条件',
+    '下一步'
+  ];
+  let fragments = value
+    .split(/[“”「」『』"'“”]/u)
+    .flatMap((part) => [part]);
+  const forbidden = [
+    topicCore(topic),
+    ...roster.map(({ name }) => name),
+    ...roster.map(({ alias }) => alias),
+    ...boilerplate
+  ].filter(Boolean);
+  for (const phrase of forbidden) {
+    fragments = fragments.flatMap((fragment) => fragment.split(phrase));
+  }
+  fragments = fragments.flatMap((fragment) =>
+    fragment.split(/[，,。！？!?；;：:、]/u)
+  );
+
+  const stance = sentencePoint(target.stance);
+  const ranked = fragments
+    .map((fragment) => fragment.trim())
+    .filter((fragment) => Array.from(fragment).length >= 4)
+    .map((fragment) => longestCommonSubstring(fragment, stance))
+    .filter((fragment) => Array.from(fragment).length >= 4)
+    .sort(
+      (left, right) =>
+        Array.from(right).length - Array.from(left).length
+    );
+  const best = ranked[0];
+  if (!best) {
+    return '';
+  }
+  const characters = Array.from(best);
+  return characters.length > 12
+    ? `${characters.slice(0, 11).join('')}…`
+    : best;
+}
+
+function isParticipantAlias(value: unknown): value is string {
+  return value === 'H' || isExpertAlias(value);
+}
+
+function readRoster(context: MockContext): MockRosterEntry[] {
+  if (Array.isArray(context.roster)) {
+    const roster = context.roster.flatMap((value) => {
+      if (!isRecord(value) || !isParticipantAlias(value.alias)) {
+        return [];
+      }
+      const name = readString(value.name).trim();
+      if (!name) {
+        return [];
+      }
+      return [
+        {
+          alias: value.alias,
+          name,
+          profession: readString(value.profession, '圆桌嘉宾'),
+          title: readString(value.title, '嘉宾'),
+          stanceTag: readString(value.stanceTag, '观点'),
+          stance: readString(value.stance, '结合实际条件判断。')
+        }
+      ];
+    });
+    if (roster.length > 0) {
+      return roster;
+    }
+  }
+
+  const aliases = isRecord(context.aliasMap) ? context.aliasMap : {};
+  return Object.entries(aliases).flatMap(([alias, value]) =>
+    isParticipantAlias(alias) && typeof value === 'string'
+      ? [
+          {
+            alias,
+            name: value,
+            profession: alias === 'H' ? '圆桌主持人' : '圆桌嘉宾',
+            title: alias === 'H' ? '主持人' : '专家',
+            stanceTag: '观点',
+            stance: '结合话题与实际条件判断。'
+          }
+        ]
+      : []
+  );
+}
+
+function rosterEntry(
+  roster: readonly MockRosterEntry[],
+  alias: string
+): MockRosterEntry | undefined {
+  return roster.find((entry) => entry.alias === alias);
+}
+
+function speakerFromContext(
+  context: MockContext,
+  alias: string,
+  roster: readonly MockRosterEntry[]
+): MockRosterEntry {
+  const matched = rosterEntry(roster, alias);
+  if (matched) {
+    return matched;
+  }
+  const card = isRecord(context.speaker) ? context.speaker : {};
+  return {
+    alias,
+    name: readString(card.name, alias),
+    profession: readString(card.profession, '圆桌嘉宾'),
+    title: readString(card.title, '专家'),
+    stanceTag: readString(card.stanceTag, '观点'),
+    stance: readString(card.stance, '结合话题与实际条件判断。')
+  };
+}
+
+function parseTranscriptLine(line: string): MockTranscriptEntry | null {
+  const match = line.match(
+    /^#(\d+)\s+(\S+)\s+(.+?)(?:（[^）]*）)?[：:]\s*(.*)$/u
+  );
+  if (!match || !isParticipantAlias(match[2])) {
+    return null;
+  }
+  return {
+    seq: Number(match[1]),
+    speakerAlias: match[2],
+    speakerName: match[3]?.trim() ?? match[2],
+    act: 'statement',
+    replyToAlias: null,
+    content: match[4]?.trim() ?? ''
+  };
+}
+
 function readTranscript(context: MockContext): string[] {
   if (typeof context.transcriptWindow === 'string') {
     return context.transcriptWindow.split(/\r?\n/u).filter(Boolean);
@@ -44,26 +280,82 @@ function readTranscript(context: MockContext): string[] {
   return [];
 }
 
-function readLastSpeakerAlias(line: string | undefined): string | null {
-  if (!line) {
-    return null;
+function readPromptUtterances(value: unknown): MockTranscriptEntry[] {
+  if (!Array.isArray(value)) {
+    return [];
   }
-  return line.match(/^#\d+\s+([^\s]+)/u)?.[1] ?? null;
+  return value.flatMap((utterance) => {
+    if (
+      !isRecord(utterance) ||
+      !isParticipantAlias(utterance.speakerAlias) ||
+      typeof utterance.seq !== 'number' ||
+      !Number.isInteger(utterance.seq) ||
+      utterance.seq < 1 ||
+      typeof utterance.content !== 'string'
+    ) {
+      return [];
+    }
+    return [
+      {
+        seq: utterance.seq,
+        speakerAlias: utterance.speakerAlias,
+        speakerName: readString(utterance.speakerName, utterance.speakerAlias),
+        act: readString(utterance.act, 'statement'),
+        replyToAlias: isParticipantAlias(utterance.replyToAlias)
+          ? utterance.replyToAlias
+          : null,
+        content: utterance.content
+      }
+    ];
+  });
 }
 
-function readLastSpeakerName(line: string | undefined): string | null {
-  if (!line) {
-    return null;
+function transcriptEntries(context: MockContext): MockTranscriptEntry[] {
+  if (Array.isArray(context.transcriptWindow)) {
+    return readPromptUtterances(context.transcriptWindow);
   }
-  return line.match(/^#\d+\s+\S+\s+([^（:：]+)/u)?.[1]?.trim() ?? null;
+  return readTranscript(context)
+    .map(parseTranscriptLine)
+    .filter((entry): entry is MockTranscriptEntry => entry !== null);
 }
 
-function readLastContent(line: string | undefined): string {
-  if (!line) {
-    return '';
+function mostRecentUtterance(
+  entries: readonly MockTranscriptEntry[],
+  alias: string
+): MockTranscriptEntry | undefined {
+  return [...entries].reverse().find((entry) => entry.speakerAlias === alias);
+}
+
+function latestReply(
+  entries: readonly MockTranscriptEntry[],
+  alias: string,
+  beforeSeq: number
+): MockTranscriptEntry | undefined {
+  return [...entries]
+    .filter(
+      (entry) => entry.speakerAlias === alias && entry.seq < beforeSeq
+    )
+    .sort((left, right) => right.seq - left.seq)[0];
+}
+
+function readPreviousUtterance(
+  context: MockContext,
+  entries: readonly MockTranscriptEntry[]
+): { alias: string | null; relation: string } {
+  if (isRecord(context.previousUtterance)) {
+    const alias = isParticipantAlias(context.previousUtterance.speakerAlias)
+      ? context.previousUtterance.speakerAlias
+      : null;
+    const relation = readString(context.previousUtterance.relation);
+    if (alias || relation) {
+      return { alias, relation };
+    }
   }
-  const separator = line.indexOf('：');
-  return separator >= 0 ? line.slice(separator + 1).trim() : line;
+  const previous = entries.at(-1);
+  return {
+    alias: previous?.speakerAlias ?? null,
+    relation: ''
+  };
 }
 
 function isExpertAlias(value: unknown): value is string {
@@ -77,7 +369,7 @@ function topicProfiles(topic: string): SpeakerProfile[] {
         name: '陈澄',
         profession: '软件工程师',
         title: '应用开发负责人',
-        stance: '支持把助手用于重复编码，但新人仍需参与调试和评审。',
+        stance: '支持助手承担重复编码，但新人仍需参与调试和评审。',
         stanceTag: '有条件支持',
         persona: '长期带领产品研发团队，表达直接，习惯用交付流程解释问题。'
       },
@@ -85,7 +377,7 @@ function topicProfiles(topic: string): SpeakerProfile[] {
         name: '周明',
         profession: '初级程序员导师',
         title: '工程教育顾问',
-        stance: '担心基础任务减少会压缩新人练习和成长的入口。',
+        stance: '担心基础任务减少会挤压新人练习。',
         stanceTag: '谨慎',
         persona: '关注新人培养与代码阅读，先讲学习机制，再给具体练习例子。'
       },
@@ -101,7 +393,7 @@ function topicProfiles(topic: string): SpeakerProfile[] {
         name: '唐宁',
         profession: '职业教育教师',
         title: '软件人才培养负责人',
-        stance: '反对把代码生成能力直接当作初级岗位的替代品。',
+        stance: '反对把代码生成当作新人替代品。',
         stanceTag: '反对',
         persona: '负责项目式教学，语气平实，常用课堂训练和实习安排举例。'
       },
@@ -117,7 +409,7 @@ function topicProfiles(topic: string): SpeakerProfile[] {
         name: '林舟',
         profession: '研发效能顾问',
         title: '企业工程效能顾问',
-        stance: '对岗位总量保持中立，重点观察团队是否增加有效需求。',
+        stance: '认为岗位总量变化取决于需求增长。',
         stanceTag: '中立',
         persona: '服务多家研发团队，喜欢拆解指标，避免用单一效率数字下结论。'
       }
@@ -138,7 +430,7 @@ function topicProfiles(topic: string): SpeakerProfile[] {
         name: '沈予安',
         profession: '消费者研究员',
         title: '用户研究负责人',
-        stance: '担心复杂问题中的信任和人工升级路径被削弱。',
+        stance: '担心复杂问题难以及时转交人工。',
         stanceTag: '审慎',
         persona: '长期研究消费者权益，说话温和但会紧扣真实使用情境。'
       },
@@ -146,7 +438,7 @@ function topicProfiles(topic: string): SpeakerProfile[] {
         name: '许行之',
         profession: '客户运营专家',
         title: '服务运营负责人',
-        stance: '有条件支持，前提是人工可以及时接手疑难问题。',
+        stance: '有条件支持规则清楚的环节试点，前提是人工可以及时接手疑难问题。',
         stanceTag: '有条件支持',
         persona: '负责一线服务运营，习惯从交接流程和异常处理谈问题。'
       },
@@ -154,7 +446,7 @@ function topicProfiles(topic: string): SpeakerProfile[] {
         name: '程望舒',
         profession: '劳动关系研究员',
         title: '数字化转型研究员',
-        stance: '反对用自动化速度代替服务质量和员工保障评估。',
+        stance: '反对用自动化替代服务质量评估。',
         stanceTag: '反对',
         persona: '研究组织转型与工作质量，表达谨慎，重视可观察的长期影响。'
       },
@@ -170,7 +462,7 @@ function topicProfiles(topic: string): SpeakerProfile[] {
         name: '顾行舟',
         profession: '产品研究员',
         title: '智能服务产品研究员',
-        stance: '保持中立，主张先比较不同问题类型的实际效果。',
+        stance: '主张先比较不同问题类型的实际效果。',
         stanceTag: '中立',
         persona: '重视实验设计，表达条理清晰，不轻易把局部结果推广到所有场景。'
       }
@@ -198,7 +490,7 @@ function topicProfiles(topic: string): SpeakerProfile[] {
       name: '周景行',
       profession: '政策顾问',
       title: '公共政策研究员',
-      stance: '有条件支持，前提是建立清楚的评估与纠偏机制。',
+      stance: '有条件支持先开展可评估的试点，前提是建立清楚的评估与纠偏机制。',
       stanceTag: '有条件支持',
       persona: '熟悉政策实施与评估，表达严谨，会拆解执行条件。'
     },
@@ -222,11 +514,93 @@ function topicProfiles(topic: string): SpeakerProfile[] {
       name: '许闻溪',
       profession: '风险治理专家',
       title: '风险管理顾问',
-      stance: '保持中立，建议先明确失败时的责任和补救方式。',
+      stance: '主张先明确失败时的责任与补救。',
       stanceTag: '中立',
       persona: '关注风险预案，表达清楚，喜欢把讨论落到应急机制。'
     }
   ];
+}
+
+const MOCK_SURNAMES = [
+  '林',
+  '陈',
+  '周',
+  '顾',
+  '沈',
+  '许',
+  '唐',
+  '程',
+  '叶',
+  '苏',
+  '陆',
+  '方',
+  '宋',
+  '秦',
+  '孟',
+  '蒋',
+  '魏',
+  '郑',
+  '罗',
+  '高',
+  '严',
+  '梁',
+  '白',
+  '董',
+  '袁',
+  '韩',
+  '薛',
+  '邵',
+  '姚',
+  '龚',
+  '莫',
+  '庄'
+] as const;
+
+const MOCK_GIVEN_NAMES = [
+  '知夏',
+  '予安',
+  '景行',
+  '清和',
+  '望舒',
+  '子衿',
+  '天宇',
+  '思睿',
+  '明远',
+  '晓峰',
+  '雨桐',
+  '言川',
+  '若溪',
+  '星野',
+  '嘉禾',
+  '云舟',
+  '书宁',
+  '怀瑾',
+  '明月',
+  '南乔',
+  '景明',
+  '安宁',
+  '亦辰',
+  '清越',
+  '文昊',
+  '念真',
+  '景澄',
+  '沐言',
+  '向晚',
+  '南风',
+  '以宁',
+  '承泽'
+] as const;
+
+function fictionalName(seed: number, index: number): string {
+  const surnameIndex =
+    ((seed % MOCK_SURNAMES.length) + index * 7) % MOCK_SURNAMES.length;
+  const givenNameIndex =
+    ((Math.floor(seed / MOCK_SURNAMES.length) % MOCK_GIVEN_NAMES.length) +
+      index * 5) %
+    MOCK_GIVEN_NAMES.length;
+  const surname = MOCK_SURNAMES[surnameIndex] ?? MOCK_SURNAMES[0];
+  const givenName = MOCK_GIVEN_NAMES[givenNameIndex] ?? MOCK_GIVEN_NAMES[0];
+  return `${surname}${givenName}`;
 }
 
 function buildLineup(
@@ -244,15 +618,28 @@ function buildLineup(
     requestedCount <= 6
       ? requestedCount
       : 4;
-  const experts = Array.from({ length: expertCount }, (_, index) => {
-    const profile = profiles[index];
-    return profile ? { ...profile } : profiles[0];
-  }).filter((profile): profile is SpeakerProfile => profile !== undefined);
-  const hostNames = ['林知远', '周予安', '顾清和'] as const;
+  const profileIndices =
+    expertCount === 2
+      ? [0, 3]
+      : expertCount === 3
+        ? [0, 2, 3]
+        : Array.from({ length: expertCount }, (_, index) => index);
+  const lineupSeed = Math.floor(
+    createRng(
+      `mock-lineup:${request.discussionId ?? 'default'}:${callIndex}`
+    )() *
+      0x1_0000_0000
+  );
+  const experts = profileIndices.flatMap((profileIndex, index) => {
+    const profile = profiles[profileIndex];
+    return profile
+      ? [{ ...profile, name: fictionalName(lineupSeed, index) }]
+      : [];
+  });
 
   return {
     host: {
-      name: hostNames[callIndex % hostNames.length] ?? hostNames[0],
+      name: fictionalName(lineupSeed, expertCount),
       profession: '圆桌主持人',
       title: '公共议题主持人',
       stance: '保持中立，帮助嘉宾把分歧与条件说清楚。',
@@ -263,196 +650,534 @@ function buildLineup(
   };
 }
 
-function buildBid(context: MockContext, callIndex: number): unknown {
-  const transcript = readTranscript(context);
-  const lastLine = transcript.at(-1);
+type TextTemplate<T> = (data: T) => string;
+
+interface UtteranceTemplateData {
+  topic: string;
+  targetName: string;
+  quote: string;
+  stance: string;
+}
+
+const UTTERANCE_TEMPLATES: Record<
+  string,
+  readonly TextTemplate<UtteranceTemplateData>[]
+> = {
+  statement: [
+    ({ stance }) => `我${stance}；还要把适用条件说清。`,
+    ({ topic, stance }) => `就${topic}而言，我${stance}，还要核实实际影响。`,
+    ({ stance }) => `我${stance}，这也决定了后续怎样衡量结果。`,
+    ({ stance }) => `我${stance}；不能只凭一个条件下结论。`,
+    ({ stance }) => `我${stance}，实施范围需要逐步核对。`,
+    ({ stance }) => `我${stance}，具体效果还要结合现场观察。`
+  ],
+  rebut: [
+    ({ targetName, quote, stance }) =>
+      quote
+        ? `我不同意${targetName}提到的“${quote}”；我${stance}。`
+        : `我不同意${targetName}这个判断；我${stance}。`,
+    ({ targetName, stance }) =>
+      `我不同意${targetName}这一步推断；我${stance}。`,
+    ({ stance }) => `这个结论还缺一个条件；我${stance}。`,
+    ({ stance }) => `我不接受这一步推断，因为我${stance}。`,
+    ({ stance }) => `关键条件还没有说清；我${stance}。`,
+    ({ stance }) => `这个判断还需要核实；我${stance}。`
+  ],
+  supplement: [
+    ({ targetName, stance }) => `接着${targetName}的看法，我${stance}。`,
+    ({ stance }) => `我认同这个方向，并补上一项条件：我${stance}。`,
+    ({ targetName, stance }) => `我也认可${targetName}的判断；我${stance}。`,
+    ({ stance }) => `这项补充会影响评估，我${stance}。`,
+    ({ stance }) => `另一项需要纳入的因素是：我${stance}。`,
+    ({ stance }) => `沿着刚才的讨论，我${stance}，还要核对影响范围。`
+  ],
+  interrupt: [
+    ({ targetName, stance }) =>
+      `我不同意${targetName}这个判断，得当场回应：我${stance}。`,
+    ({ stance }) => `这一点我不能接受，必须现在说清：我${stance}。`,
+    ({ stance }) => `我得立即回应这个推断；我${stance}。`,
+    ({ stance }) => `这处冲突不能略过，我当场反对：我${stance}。`,
+    ({ stance }) => `我不同意这个结论，关键原因是我${stance}。`,
+    ({ stance }) => `先说明我的异议：我${stance}，这个判断还需要核实。`
+  ]
+};
+
+interface HostTemplateData {
+  topic: string;
+  guestList: string;
+  firstGuestName: string;
+  targetName: string;
+  profession: string;
+  quote: string;
+  divergence: string;
+  sides: readonly { name: string; position: string }[];
+}
+
+const HOST_TEMPLATES: Record<
+  string,
+  readonly TextTemplate<HostTemplateData>[]
+> = {
+  opening: [
+    ({ topic, guestList, firstGuestName }) =>
+      `今天讨论${topic}。嘉宾有：${guestList}。先请${firstGuestName}从自己的立场说起。`,
+    ({ topic, guestList }) =>
+      `今天的话题是${topic}。到场嘉宾依次是：${guestList}。请各位先亮出判断。`,
+    ({ topic, guestList }) =>
+      `我们围绕${topic}展开讨论。现场嘉宾是：${guestList}。先从第一位嘉宾的观察开始。`,
+    ({ topic, guestList }) =>
+      `今天聚焦${topic}。欢迎${guestList}。我们先请各位简要说说判断。`
+  ],
+  follow_up: [
+    ({ targetName, quote, profession }) =>
+      quote
+        ? `${targetName}提到“${quote}”，请从${profession}的角度说说，最需要核实什么？`
+        : `${targetName}的看法值得继续讨论，请从${profession}的角度说说，最需要核实什么？`,
+    ({ targetName, profession }) =>
+      `${targetName}，从${profession}的角度看，哪项条件最影响你的判断？`,
+    ({ targetName, profession }) =>
+      `${targetName}的观点还可以从${profession}的实践核实，你会先看哪一项？`,
+    ({ targetName, profession }) =>
+      `请${targetName}从${profession}的角度回应刚才的分歧，最关键的证据是什么？`
+  ],
+  invite: [
+    ({ targetName, profession, topic }) =>
+      `${targetName}，结合${profession}的实践，针对${topic}你会先核实什么？`,
+    ({ targetName, profession }) =>
+      `也请${targetName}从${profession}的角度谈谈，这项议题的适用边界在哪里？`,
+    ({ targetName, profession }) =>
+      `${targetName}，你的${profession}视角能补充哪些条件？`,
+    ({ targetName, profession }) =>
+      `请${targetName}结合${profession}的经验，说明哪些情形需要例外处理。`
+  ],
+  bridge: [
+    ({ targetName, divergence, sides }) =>
+      sides.length >= 2
+        ? `${sides[0]?.name}${sides[0]?.position}，${sides[1]?.name}则${sides[1]?.position}。${targetName}，请回应双方分歧中的关键条件。`
+        : `关于${divergence}，目前还有条件需要说清。${targetName}，你怎么看？`,
+    ({ targetName, divergence, sides }) =>
+      sides.length >= 2
+        ? `${sides[0]?.name}${sides[0]?.position}；${sides[1]?.name}则${sides[1]?.position}。${targetName}，你认为哪项条件最关键？`
+        : `${divergence}还需要具体讨论。${targetName}，你会先核对哪项条件？`,
+    ({ targetName, divergence, sides }) =>
+      sides.length >= 2
+        ? `${sides[0]?.name}${sides[0]?.position}，而${sides[1]?.name}${sides[1]?.position}。${targetName}，请回应这处差异。`
+        : `${divergence}还有哪些分歧需要辨清？${targetName}，请谈谈你的判断。`,
+    ({ targetName, divergence, sides }) =>
+      sides.length >= 2
+        ? `${sides[0]?.name}的观点是${sides[0]?.position}，${sides[1]?.name}则${sides[1]?.position}。${targetName}，你愿意回应哪一边？`
+        : `${divergence}仍有待展开。${targetName}，你认为关键条件是什么？`
+  ],
+  closing: [
+    ({ topic }) =>
+      `今天关于${topic}先讨论到这里，后续仍可核对具体条件。`,
+    ({ topic }) =>
+      `感谢各位讨论${topic}，接下来可以继续追踪实际变化。`,
+    ({ topic }) =>
+      `关于${topic}，还有问题值得继续展开。感谢各位嘉宾参与。`,
+    ({ topic }) =>
+      `我们先把${topic}留作开放议题，感谢各位嘉宾和观众。`
+  ]
+};
+
+function buildBid(
+  context: MockContext,
+  callIndex: number,
+  discussionId: string
+): unknown {
+  const entries = transcriptEntries(context);
   const speakerAlias = readString(context.speakerAlias, 'E1');
-  const lastSpeakerAlias = readLastSpeakerAlias(lastLine);
+  const roster = readRoster(context);
+  const speaker = speakerFromContext(context, speakerAlias, roster);
+  const previous = readPreviousUtterance(context, entries);
+  const previousAlias =
+    previous.alias ?? entries.at(-1)?.speakerAlias ?? null;
+  const previousSpeaker = previousAlias
+    ? rosterEntry(roster, previousAlias)
+    : undefined;
+  const relation =
+    previous.relation ||
+    (previousAlias === 'H'
+      ? '主持人发言'
+      : previousSpeaker
+        ? previousSpeaker.stanceTag === speaker.stanceTag
+          ? '相同'
+          : '不同'
+        : '暂无上一条发言');
   const addressed =
     context.addressed === true ||
     context.wasAddressed === true ||
     context.isAddressed === true;
-  const wantsToSpeak = addressed || lastSpeakerAlias !== speakerAlias;
+  const seed = `${discussionId}:${callIndex}:${speakerAlias}`;
+  const wantsToSpeak =
+    addressed ||
+    (previousAlias !== speakerAlias &&
+      createRng(`mock-bid-wants:${seed}`)() < 0.5);
+  const interruptOdds = createRng(`mock-bid-interrupt:${seed}`)();
+  const proposedIntent =
+    relation === '主持人发言'
+      ? 'raise_hand'
+      : relation === '相同'
+        ? 'supplement'
+        : relation === '不同'
+          ? interruptOdds < 0.16
+            ? 'interrupt'
+            : 'rebut'
+          : 'raise_hand';
+  const intent =
+    wantsToSpeak && proposedIntent === 'interrupt'
+      ? proposedIntent
+      : proposedIntent === 'interrupt'
+        ? 'rebut'
+        : proposedIntent;
+  const urgencySample = createRng(`mock-bid-urgency:${seed}`)();
+  const urgency = !wantsToSpeak
+    ? 0.2 + urgencySample * 0.3
+    : addressed
+      ? 0.88 + urgencySample * 0.12
+      : intent === 'interrupt'
+        ? 0.85 + urgencySample * 0.15
+        : intent === 'rebut'
+          ? 0.62 + urgencySample * 0.18
+          : intent === 'supplement'
+            ? 0.6 + urgencySample * 0.15
+            : 0.35 + urgencySample * 0.25;
   const replyTo =
-    lastSpeakerAlias && lastSpeakerAlias !== speakerAlias
-      ? lastSpeakerAlias
-      : isExpertAlias(context.replyToAlias)
+    previousAlias && previousAlias !== speakerAlias
+      ? previousAlias
+      : isExpertAlias(context.replyToAlias) &&
+          context.replyToAlias !== speakerAlias
         ? context.replyToAlias
         : null;
-  const intents = ['rebut', 'supplement', 'raise_hand', 'interrupt'] as const;
-  const intent = intents[callIndex % intents.length] ?? 'raise_hand';
-  const lastContent = readLastContent(lastLine);
-  const focus =
-    /成本|预算/u.test(lastContent)
-      ? '回应成本承担边界'
-      : /人工|升级/u.test(lastContent)
-        ? '补充人工接手机制'
-        : /新人|岗位/u.test(lastContent)
-          ? '回应新人训练入口'
-          : '说明试点适用条件';
+  const replyTarget =
+    replyTo && replyTo !== 'H' ? rosterEntry(roster, replyTo) : undefined;
+  const focus = replyTarget
+    ? `回应${replyTarget.name}的${sentencePoint(replyTarget.stance).startsWith('担心') ? '担忧' : '看法'}`
+    : sentencePoint(speaker.stance);
 
   return {
     wantToSpeak: wantsToSpeak,
     intent,
-    urgency: intent === 'interrupt' ? 0.84 : intent === 'rebut' ? 0.72 : 0.58,
+    urgency: Number(urgency.toFixed(2)),
     replyTo,
     focus
   };
 }
 
-function buildUtterance(context: MockContext, callIndex: number): string {
-  const transcript = readTranscript(context);
-  const lastLine = transcript.at(-1);
-  const targetAlias = readString(context.replyToAlias, '');
-  const targetName =
-    targetAlias && readLastSpeakerAlias(lastLine) === targetAlias
-      ? readLastSpeakerName(lastLine)
-      : null;
-  const greeting = targetName ? `${targetName}，` : '';
+function buildUtterance(
+  context: MockContext,
+  nextTemplateIndex: (scope: string, count: number) => number
+): string {
   const act = readString(context.act, 'statement');
-  const topic = readString(context.topic);
-  const topicFragment = topic ? `围绕“${topic}”，` : '';
-  const variations = [
-    '还要看新人能否独立定位错误，而不只是生成速度。',
-    '关键是把复核责任和练习机会一起设计进去。',
-    '这需要用真实任务验证，不能只比较完成时间。'
-  ];
-  const variation = variations[callIndex % variations.length] ?? variations[0];
-
-  if (act === 'rebut') {
-    return `${greeting}基础任务变少不等于培养入口消失；团队仍要安排可复盘的真实练习。`;
-  }
-  if (act === 'supplement') {
-    return `${greeting}还需要补上明确的人工复核和责任边界，否则效率提升未必能变成可靠交付。`;
-  }
-  if (act === 'interrupt') {
-    return `等一下，${topicFragment}不能把生成速度直接等同于岗位消失；${variation}`;
-  }
-  return `${topicFragment}更实际的衡量点是新人能否独立定位错误。${variation}`;
+  const templates = UTTERANCE_TEMPLATES[act] ?? UTTERANCE_TEMPLATES.statement!;
+  const speakerAlias = readString(context.speakerAlias, 'E1');
+  const targetAlias = readString(context.replyToAlias, '');
+  const roster = readRoster(context);
+  const speaker = speakerFromContext(context, speakerAlias, roster);
+  const target =
+    targetAlias && isParticipantAlias(targetAlias)
+      ? rosterEntry(roster, targetAlias)
+      : undefined;
+  const entries = transcriptEntries(context);
+  const targetUtterance = targetAlias
+    ? mostRecentUtterance(entries, targetAlias)
+    : entries.at(-1);
+  const topic = topicCore(readString(context.topic));
+  const data: UtteranceTemplateData = {
+    topic,
+    targetName: target?.name ?? targetUtterance?.speakerName ?? '前一位嘉宾',
+    quote:
+      target && targetUtterance
+        ? shortQuote(targetUtterance.content, target, roster, topic)
+        : '',
+    stance: sentencePoint(speaker.stance)
+  };
+  const index = nextTemplateIndex(`utterance:${act}`, templates.length);
+  return (templates[index]?.(data) ?? templates[0]!(data)).replace(/…/gu, '');
 }
 
-function buildHost(context: MockContext, callIndex: number): string {
-  const action = readString(context.action, 'opening');
-  const targetAlias = readString(context.targetAlias, '');
-  const transcript = readTranscript(context);
-  const lastLine = transcript.at(-1);
-  const targetName = readLastSpeakerName(lastLine);
-  const topic = readString(context.topic, '今天的讨论议题');
-  const name = targetAlias && targetName ? targetName : '这位嘉宾';
+function parseDivergence(
+  context: MockContext,
+  roster: readonly MockRosterEntry[]
+): { content: string; sides: Array<{ name: string; position: string }> } {
+  const raw = context.divergence;
+  if (isRecord(raw) && typeof raw.content === 'string') {
+    const sides = Array.isArray(raw.stances)
+      ? raw.stances.flatMap((value) => {
+          if (
+            !isRecord(value) ||
+            !isExpertAlias(value.speakerAlias) ||
+            typeof value.position !== 'string'
+          ) {
+            return [];
+          }
+          const participant = rosterEntry(roster, value.speakerAlias);
+          return participant
+            ? [
+                {
+                  name: participant.name,
+                  position: sentencePoint(value.position)
+                }
+              ]
+            : [];
+        })
+      : [];
+    return { content: raw.content, sides };
+  }
+  if (typeof raw === 'string') {
+    const [content = '', ...sideLines] = raw.split(/[；;]/u);
+    const sides = sideLines.flatMap((line) => {
+      const match = line.trim().match(/^(E\d+)\s+[^：:]+[：:](.*)$/u);
+      if (!match || !isExpertAlias(match[1])) {
+        return [];
+      }
+      const participant = rosterEntry(roster, match[1]);
+      return participant
+        ? [
+            {
+              name: participant.name,
+              position: sentencePoint(match[2] ?? '')
+            }
+          ]
+        : [];
+    });
+    return { content: content.trim(), sides };
+  }
+  return { content: '', sides: [] };
+}
 
-  if (action === 'opening') {
-    return `欢迎来到圆桌现场，今天讨论“${topic}”。嘉宾将从工程实践、学习路径和用工变化等角度展开。`;
+function buildHost(
+  context: MockContext,
+  nextTemplateIndex: (scope: string, count: number) => number
+): string {
+  const action = readString(context.action, 'opening');
+  const templates = HOST_TEMPLATES[action] ?? HOST_TEMPLATES.follow_up!;
+  const roster = readRoster(context);
+  const entries = transcriptEntries(context);
+  const targetAlias = readString(context.targetAlias, '');
+  const target =
+    targetAlias && isParticipantAlias(targetAlias)
+      ? rosterEntry(roster, targetAlias)
+      : undefined;
+  const targetUtterance = targetAlias
+    ? mostRecentUtterance(entries, targetAlias)
+    : undefined;
+  const divergence = parseDivergence(context, roster);
+  const topic = topicCore(readString(context.topic));
+  const guestList = roster
+    .filter(({ alias }) => alias !== 'H')
+    .map(({ name, profession, title }) => `${name}（${profession} · ${title}）`)
+    .join('、');
+  const firstGuestName =
+    roster.find(({ alias }) => alias !== 'H')?.name ?? '各位嘉宾';
+  const data: HostTemplateData = {
+    topic,
+    guestList: guestList || '嘉宾名单待提供',
+    firstGuestName,
+    targetName: target?.name ?? '这位嘉宾',
+    profession: target?.profession ?? '专业领域',
+    quote:
+      target && targetUtterance
+        ? shortQuote(targetUtterance.content, target, roster, topic)
+        : '',
+    divergence: (divergence.content || topic).replace(/…/gu, ''),
+    sides: divergence.sides
+  };
+  const index = nextTemplateIndex(`host:${action}`, templates.length);
+  return (templates[index]?.(data) ?? templates[0]!(data)).replace(/…/gu, '');
+}
+
+function insightUtterances(context: MockContext): {
+  window: MockTranscriptEntry[];
+  added: MockTranscriptEntry[];
+} {
+  const window = Array.isArray(context.transcriptWindow)
+    ? readPromptUtterances(context.transcriptWindow)
+    : transcriptEntries(context);
+  const added = readPromptUtterances(context.newUtterances);
+  const bySeq = new Map<number, MockTranscriptEntry>();
+  for (const utterance of [...window, ...added]) {
+    bySeq.set(utterance.seq, utterance);
   }
-  if (action === 'bridge') {
-    return `目前的分歧集中在效率收益与新人训练能否兼得，${name}，你怎么看对方提出的条件？`;
-  }
-  if (action === 'invite') {
-    return `${name}，结合你的专业背景，哪类任务最适合作为新人练习的起点？`;
-  }
-  if (action === 'closing') {
-    return `今天先把争议留在桌面上，后续还需要用真实项目检验这些条件。`;
-  }
-  const questions = [
-    '你能举一个最适合先验证的具体任务吗？',
-    '如果新人要保留练习机会，团队需要先改变哪一步？',
-    '你认为怎样的评估结果才足以支持扩大试点？'
-  ];
-  const question = questions[callIndex % questions.length] ?? questions[0];
-  return `${name}，你刚才的观点里，哪项条件最可能改变实际结果？${question}`;
+  return {
+    window: [...bySeq.values()].sort((left, right) => left.seq - right.seq),
+    added
+  };
+}
+
+function existingDivergenceRef(
+  context: MockContext,
+  first: MockRosterEntry,
+  second: MockRosterEntry
+): string | null {
+  const text = readString(
+    context.existingInsightsText,
+    readString(context.insightsText)
+  );
+  const matches = text.split(/\r?\n/u).find((line) => {
+    if (!/^D\d+\b/u.test(line)) {
+      return false;
+    }
+    const hasFirst = line.includes(first.name) || line.includes(first.alias);
+    const hasSecond = line.includes(second.name) || line.includes(second.alias);
+    return hasFirst && hasSecond;
+  });
+  return matches?.match(/^(D\d+)\b/u)?.[1] ?? null;
 }
 
 function buildInsights(context: MockContext): unknown {
-  const utterances = Array.isArray(context.newUtterances)
-    ? context.newUtterances.filter(isRecord)
-    : [];
+  const roster = readRoster(context);
+  const { window, added } = insightUtterances(context);
   const consensus: Array<Record<string, unknown>> = [];
   const divergences: Array<Record<string, unknown>> = [];
 
-  for (const utterance of utterances) {
+  for (const utterance of added) {
     const speakerAlias = utterance.speakerAlias;
     const replyToAlias = utterance.replyToAlias;
-    const seq = utterance.seq;
-    const act = utterance.act;
     if (
       !isExpertAlias(speakerAlias) ||
       !isExpertAlias(replyToAlias) ||
-      speakerAlias === replyToAlias ||
-      typeof seq !== 'number' ||
-      !Number.isInteger(seq) ||
-      seq <= 0
+      speakerAlias === replyToAlias
     ) {
       continue;
     }
-    const evidence =
-      utterances
-        .filter(
-          (candidate) =>
-            candidate.speakerAlias === speakerAlias ||
-            candidate.speakerAlias === replyToAlias
-        )
-        .map((candidate) => candidate.seq)
-        .filter(
-          (candidateSeq): candidateSeq is number =>
-            typeof candidateSeq === 'number' && Number.isInteger(candidateSeq)
-        )
-        .sort((left, right) => left - right) || [seq];
+    const speaker = rosterEntry(roster, speakerAlias);
+    const target = rosterEntry(roster, replyToAlias);
+    if (!speaker || !target) {
+      continue;
+    }
+    const related = latestReply(window, replyToAlias, utterance.seq);
+    const evidence = related
+      ? [related.seq, utterance.seq].sort((left, right) => left - right)
+      : [utterance.seq];
+    const targetPosition = sentencePoint(target.stance);
+    const speakerPosition = sentencePoint(speaker.stance);
 
-    if (act === 'rebut' || act === 'interrupt') {
+    if (utterance.act === 'rebut' || utterance.act === 'interrupt') {
       divergences.push({
-        ref: null,
-        content: '效率收益与训练机会应如何兼顾',
+        ref: existingDivergenceRef(context, speaker, target),
+        content: `${speaker.name}${speakerPosition}，${target.name}则${targetPosition}`,
         stances: [
-          { who: speakerAlias, position: '先验证效率收益' },
-          { who: replyToAlias, position: '优先保留训练机会' }
+          {
+            who: speakerAlias,
+            position: speakerPosition
+          },
+          {
+            who: replyToAlias,
+            position: targetPosition
+          }
         ],
         evidence,
         resolved: false
       });
-    } else if (act === 'supplement') {
+    } else if (utterance.act === 'supplement') {
       consensus.push({
         ref: null,
-        content: '试点需要设置清楚的人工复核条件',
-        participants: [speakerAlias, replyToAlias],
+        content: `${speaker.name}提出${speakerPosition}，${target.name}认同并补充${targetPosition}`,
+        participants: [replyToAlias, speakerAlias],
         evidence
       });
     }
   }
-
   return { consensus, divergences };
 }
 
-function buildSummary(context: MockContext): string {
-  const topic = readString(context.topic, '本场讨论的话题');
-  const insightText = readString(
+function readInsightEntries(
+  context: MockContext
+): Array<{ kind: 'consensus' | 'divergence'; content: string }> {
+  return readString(
     context.insightsText,
     readString(context.existingInsightsText)
-  );
-  const transcript = readTranscript(context);
-  const lastContent = readLastContent(transcript.at(-1));
-  const discussionLine = lastContent
-    ? `讨论也落到具体执行上，最新发言提醒大家关注“${lastContent.slice(0, 45)}”。`
-    : '嘉宾从实践条件、长期影响和风险边界展开了讨论。';
-  const insightsLine = insightText
-    ? '实时洞察记录了部分共识与分歧，仍需结合后续实践继续检验。'
-    : '主要共识是先明确试点范围，关键分歧仍在于效率收益与训练机会如何平衡。';
+  )
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .flatMap((line) => {
+      const match = line.match(/^[CD]\d+\s+(共识|分歧)[：:]\s*(.*)$/u);
+      if (!match) {
+        return [];
+      }
+      const content = (match[2] ?? '')
+        .split('（')[0]
+        ?.replace(/…/gu, '')
+        .trim();
+      return content
+        ? [
+            {
+              kind: match[1] === '共识' ? 'consensus' : 'divergence',
+              content
+            } as const
+          ]
+        : [];
+    });
+}
 
-  return `围绕“${topic}”，嘉宾讨论了技术变化会怎样影响初级岗位，以及哪些工作仍需要人的判断。\n\n${discussionLine}\n\n${insightsLine}\n\n后续仍要观察真实项目中的质量、培养效果和岗位需求变化。感谢各位嘉宾，也感谢观众收看。`;
+function buildSummary(context: MockContext): string {
+  const topic = topicCore(readString(context.topic));
+  const roster = readRoster(context);
+  const transcript = transcriptEntries(context);
+  const expertsWhoSpoke = transcript.filter((entry) =>
+    isExpertAlias(entry.speakerAlias)
+  );
+  const spokenByAlias = [
+    ...new Map(
+      expertsWhoSpoke.map((entry) => [entry.speakerAlias, entry])
+    ).values()
+  ];
+  const spokenViews = spokenByAlias.map((entry) => {
+    const participant = rosterEntry(roster, entry.speakerAlias);
+    const name = participant?.name ?? entry.speakerName;
+    return `${name}${sentencePoint(participant?.stance ?? entry.content)}`;
+  });
+  const insightEntries = readInsightEntries(context);
+  const divergences = insightEntries
+    .filter(({ kind }) => kind === 'divergence')
+    .map(({ content }) => content);
+  const consensus = insightEntries
+    .filter(({ kind }) => kind === 'consensus')
+    .map(({ content }) => content);
+  const openingParagraph =
+    spokenViews.length > 0
+      ? `关于${topic}，${spokenViews.join('；')}。`
+      : `关于${topic}，讨论仍需要真实发言补充具体判断。`;
+  const divergenceParagraph =
+    divergences.length > 0
+      ? `分歧主要在于：${divergences.join('；')}。`
+      : `接下来仍需梳理不同判断所依据的条件。`;
+  const nextQuestion =
+    divergences[0] !== undefined
+      ? '这处分歧接下来应核实哪些证据与适用边界'
+      : '哪些条件会改变目前的判断';
+  const thirdParagraph =
+    consensus.length > 0
+      ? `共识方面，${consensus.join('；')}。`
+      : `仍待回答的问题是：${nextQuestion}？`;
+  const spokenAliases = new Set(
+    expertsWhoSpoke.map(({ speakerAlias }) => speakerAlias)
+  );
+  const nextGuest = roster.find(
+    ({ alias }) => isExpertAlias(alias) && !spokenAliases.has(alias)
+  );
+  const closingParagraph = nextGuest
+    ? `接下来可以请${nextGuest.name}从${nextGuest.profession}的角度回应：哪些条件会改变判断？感谢各位嘉宾，也感谢观众收看。`
+    : `后续还应核实哪些证据会改变判断？感谢各位嘉宾，也感谢观众收看。`;
+  return `${openingParagraph}\n\n${divergenceParagraph}\n\n${thirdParagraph}\n\n${closingParagraph}`;
 }
 
 function generateText(
   request: LLMRequest,
   context: MockContext,
-  callIndex: number
+  callIndex: number,
+  discussionId: string,
+  nextTemplateIndex: (scope: string, count: number) => number
 ): string {
   switch (request.task) {
     case 'lineup':
       return JSON.stringify(buildLineup(context, request, callIndex));
     case 'bid':
-      return JSON.stringify(buildBid(context, callIndex));
+      return JSON.stringify(buildBid(context, callIndex, discussionId));
     case 'utterance':
-      return buildUtterance(context, callIndex);
+      return buildUtterance(context, nextTemplateIndex);
     case 'host':
-      return buildHost(context, callIndex);
+      return buildHost(context, nextTemplateIndex);
     case 'insights':
       return JSON.stringify(buildInsights(context));
     case 'summary':
@@ -474,6 +1199,7 @@ export function createMockProvider(opts: {
   const latencyMs = Math.max(0, opts.latencyMs ?? 400);
   const streamDelayMs = Math.max(0, opts.streamDelayMs ?? 30);
   const callCounts = new Map<string, number>();
+  const templateCursors = new Map<string, number>();
 
   const createResponse = (
     request: LLMRequest & { model: string }
@@ -485,7 +1211,20 @@ export function createMockProvider(opts: {
     const callIndex = callCounts.get(key) ?? 0;
     callCounts.set(key, callIndex + 1);
     const context = readContext(request.context);
-    const text = generateText(request, context, callIndex);
+    const discussionId = request.discussionId ?? 'default';
+    const nextTemplateIndex = (scope: string, count: number): number => {
+      const templateKey = `${discussionId}:${scope}`;
+      const cursor = templateCursors.get(templateKey) ?? 0;
+      templateCursors.set(templateKey, cursor + 1);
+      return cursor % count;
+    };
+    const text = generateText(
+      request,
+      context,
+      callIndex,
+      discussionId,
+      nextTemplateIndex
+    );
     return {
       text,
       promptTokens: Math.ceil((request.system.length + request.user.length) / 4),
