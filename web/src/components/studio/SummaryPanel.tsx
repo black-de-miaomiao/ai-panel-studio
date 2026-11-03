@@ -9,7 +9,9 @@ interface SummaryPanelProps {
   snapshot: DiscussionSnapshot;
   liveSummary?: string;
   onBack?: () => void;
+  onShowInsights?: () => void;
   compact?: boolean;
+  hideFooter?: boolean;
 }
 
 function downloadMarkdown(snapshot: DiscussionSnapshot) {
@@ -30,14 +32,115 @@ function downloadMarkdown(snapshot: DiscussionSnapshot) {
   URL.revokeObjectURL(url);
 }
 
+interface SummaryStatProps {
+  label: string;
+  count: number;
+  tone?: 'consensus' | 'divergence';
+  onClick?: () => void;
+  ariaLabel?: string;
+}
+
+function SummaryStat({
+  label,
+  count,
+  tone,
+  onClick,
+  ariaLabel
+}: SummaryStatProps) {
+  const className = [
+    'summary-stat',
+    tone ? `summary-stat--${tone}` : '',
+    onClick ? 'summary-stat--button' : ''
+  ].filter(Boolean).join(' ');
+  const content = (
+    <>
+      <span>{label}</span>
+      <strong>{count}</strong>
+      <small>条</small>
+    </>
+  );
+
+  return onClick ? (
+    <button
+      aria-label={ariaLabel}
+      className={className}
+      onClick={onClick}
+      type="button"
+    >
+      {content}
+    </button>
+  ) : (
+    <div className={className}>{content}</div>
+  );
+}
+
+export function SummaryPanelFooter({
+  snapshot,
+  onBack,
+  onShowInsights
+}: {
+  snapshot: DiscussionSnapshot;
+  onBack?: () => void;
+  onShowInsights?: () => void;
+}) {
+  const consensusCount = snapshot.insights.filter(
+    (insight) => insight.kind === 'consensus'
+  ).length;
+  const divergenceCount = snapshot.insights.filter(
+    (insight) => insight.kind === 'divergence'
+  ).length;
+
+  return (
+    <div className="summary-panel__footer">
+      <div className="summary-panel__stats">
+        <SummaryStat
+          ariaLabel={`切换到共识与分歧：共识 ${consensusCount} 条`}
+          count={consensusCount}
+          label="共识"
+          onClick={onShowInsights}
+          tone="consensus"
+        />
+        <SummaryStat
+          ariaLabel={`切换到共识与分歧：分歧 ${divergenceCount} 条`}
+          count={divergenceCount}
+          label="分歧"
+          onClick={onShowInsights}
+          tone="divergence"
+        />
+        <SummaryStat
+          count={snapshot.utterances.length}
+          label="实录"
+        />
+      </div>
+      <div className="summary-panel__actions">
+        <Button
+          icon={<ArrowDownToLine size={15} />}
+          onClick={() => downloadMarkdown(snapshot)}
+          size="sm"
+          variant="primary"
+        >
+          导出实录（Markdown）
+        </Button>
+        {onBack ? (
+          <Button onClick={onBack} size="sm" variant="secondary">
+            返回大厅
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export function SummaryPanel({
   snapshot,
   liveSummary = '',
   onBack,
-  compact = false
+  onShowInsights,
+  compact = false,
+  hideFooter = false
 }: SummaryPanelProps) {
   const [revealed, setRevealed] = useState(false);
-  const { discussion, participants, insights, utterances } = snapshot;
+  const { discussion } = snapshot;
   const { status, summary } = discussion;
   const isEnded = status === 'ended';
   const currentSummary = summary?.trim() ?? '';
@@ -54,13 +157,6 @@ export function SummaryPanel({
     const timer = window.setTimeout(() => setRevealed(true), 520);
     return () => window.clearTimeout(timer);
   }, [currentSummary, isEnded, revealed]);
-
-  const consensusCount = insights.filter(
-    (insight) => insight.kind === 'consensus'
-  ).length;
-  const divergenceCount = insights.filter(
-    (insight) => insight.kind === 'divergence'
-  ).length;
 
   const content = (
     <div className="summary-panel__content">
@@ -87,38 +183,13 @@ export function SummaryPanel({
               总结已完成，主持人正在整理本场讨论的关键观点。
             </p>
           )}
-          <div className="summary-panel__stats">
-            <div className="summary-stat summary-stat--consensus">
-              <span>共识</span>
-              <strong>{consensusCount}</strong>
-              <small>条</small>
-            </div>
-            <div className="summary-stat summary-stat--divergence">
-              <span>分歧</span>
-              <strong>{divergenceCount}</strong>
-              <small>条</small>
-            </div>
-            <div className="summary-stat">
-              <span>实录</span>
-              <strong>{utterances.length}</strong>
-              <small>条</small>
-            </div>
-          </div>
-          <div className="summary-panel__actions">
-            <Button
-              icon={<ArrowDownToLine size={15} />}
-              onClick={() => downloadMarkdown(snapshot)}
-              size="sm"
-              variant="primary"
-            >
-              导出实录（Markdown）
-            </Button>
-            {onBack ? (
-              <Button onClick={onBack} size="sm" variant="secondary">
-                返回大厅
-              </Button>
-            ) : null}
-          </div>
+          {!hideFooter ? (
+            <SummaryPanelFooter
+              onBack={onBack}
+              onShowInsights={onShowInsights}
+              snapshot={snapshot}
+            />
+          ) : null}
         </>
       ) : (
         <div className="summary-panel__live">

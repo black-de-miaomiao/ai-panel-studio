@@ -13,6 +13,7 @@ interface TabsProps {
   className?: string;
   ariaLabel: string;
   testIdPrefix?: string;
+  panelId?: string;
   compact?: boolean;
 }
 
@@ -23,6 +24,7 @@ export function Tabs({
   className,
   ariaLabel,
   testIdPrefix,
+  panelId,
   compact = false
 }: TabsProps) {
   const activeIndex = Math.max(
@@ -39,6 +41,7 @@ export function Tabs({
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
           return;
         }
+        const tablist = event.currentTarget;
         event.preventDefault();
         const nextIndex =
           event.key === 'Home'
@@ -51,9 +54,10 @@ export function Tabs({
         if (nextItem) {
           onChange(nextItem.key);
           requestAnimationFrame(() => {
-            document
-              .querySelector<HTMLElement>(`[data-tab-key="${nextItem.key}"]`)
-              ?.focus();
+            const nextTab = Array.from(
+              tablist.querySelectorAll<HTMLElement>('[data-tab-key]')
+            ).find((tab) => tab.dataset.tabKey === nextItem.key);
+            nextTab?.focus();
           });
         }
       }}
@@ -61,6 +65,7 @@ export function Tabs({
       {items.map((item) => (
         <button
           aria-selected={item.key === activeKey}
+          aria-controls={panelId}
           className={clsx(
             'tabs__item',
             item.key === activeKey && 'is-active'

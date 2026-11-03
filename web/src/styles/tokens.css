@@ -1,0 +1,38 @@
+@theme {
+  --color-ink-950: #05070d;
+  --color-ink-900: #0a0e17;
+  --color-ink-850: #0d121d;
+  --color-text-primary: #e6e8ee;
+  --color-text-secondary: #9aa3b2;
+  --color-text-muted: #5c6575;
+  --color-live: #ff3b5c;
+  --color-consensus: #3ddc97;
+  --color-divergence: #ff9f43;
+  --color-host: #e8c872;
+  --font-sans: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  --animate-live-pulse: live-pulse 1.6s ease-out infinite;
+  --animate-speaking-glow: speaking-glow 1.8s ease-in-out infinite;
+  --animate-sound-wave: sound-wave 0.9s ease-in-out infinite;
+  --animate-slide-in: slide-in 360ms cubic-bezier(.2,.75,.25,1) both;
+  --animate-flash: flash 2s ease-out;
+}
+
+:root {
+  color-scheme: dark;
+  font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  font-variant-numeric: tabular-nums;
+  --bg: #05070d;
+  --panel: rgba(255, 255, 255, 0.04);
+  --panel-strong: rgba(255, 255, 255, 0.06);
+  --panel-border: rgba(255, 255, 255, 0.08);
+  --text: #e6e8ee;
+  --secondary: #9aa3b2;
+  --muted: #9aa3b2;
+  --live: #ff3b5c;
+  --green: #3ddc97;
+  --orange: #ff9f43;
+  --gold: #e8c872;
+  --ease-out: cubic-bezier(.2, .75, .25, 1);
+}

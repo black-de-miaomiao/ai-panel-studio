@@ -1,15 +1,17 @@
-import type { Participant } from '@aps/shared';
+import type { DiscussionStatus, Participant } from '@aps/shared';
 import { HostSeat } from './HostSeat';
 import { ExpertStatusWindow } from './ExpertStatusWindow';
 
 interface StageArenaProps {
   participants: Participant[];
   liveSpeakerId?: string | null;
+  discussionStatus: DiscussionStatus;
 }
 
 export function StageArena({
   participants,
-  liveSpeakerId
+  liveSpeakerId,
+  discussionStatus
 }: StageArenaProps) {
   const host = participants.find((participant) => participant.role === 'host');
   const experts = participants
@@ -36,6 +38,7 @@ export function StageArena({
               participant.agentState === 'speaking'
             }
             participant={participant}
+            discussionStatus={discussionStatus}
           />
         ))}
       </div>

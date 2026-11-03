@@ -2,6 +2,7 @@ import type { CSSProperties } from 'react';
 import {
   AGENT_STATE_LABELS,
   INTENT_LABELS,
+  type DiscussionStatus,
   type Participant
 } from '@aps/shared';
 import { Avatar } from '../ui/Avatar';
@@ -16,13 +17,25 @@ const INTENT_MARKS = {
 interface ExpertStatusWindowProps {
   participant: Participant;
   isSpeaking: boolean;
+  discussionStatus: DiscussionStatus;
 }
 
 export function ExpertStatusWindow({
   participant,
-  isSpeaking
+  isSpeaking,
+  discussionStatus
 }: ExpertStatusWindowProps) {
   const state = isSpeaking ? 'speaking' : participant.agentState;
+  const focus = participant.focus?.trim() ? participant.focus : undefined;
+  const statusFocus =
+    discussionStatus === 'live'
+      ? state === 'speaking'
+        ? '正在发言'
+        : state === 'idle'
+          ? '正在聆听'
+          : null
+      : null;
+  const focusText = focus ?? statusFocus;
   return (
     <article
       className={`expert-window expert-window--${state}`}
@@ -45,6 +58,7 @@ export function ExpertStatusWindow({
       <p className="expert-window__title">
         {participant.profession} · {participant.title}
       </p>
+      <p className="expert-window__stance">{participant.stance}</p>
       <div className="expert-window__status-row">
         <span className="expert-window__status">
           {AGENT_STATE_LABELS[state]}
@@ -58,10 +72,12 @@ export function ExpertStatusWindow({
           </span>
         ) : null}
       </div>
-      {state === 'preparing' && participant.focus ? (
-        <p className="expert-window__focus">
-          <span>关注：</span>
-          {participant.focus}
+      {focusText ? (
+        <p
+          className={`expert-window__focus${!focus && statusFocus === '正在聆听' ? ' is-listening' : ''}`}
+        >
+          <span>关注点：</span>
+          {focusText}
         </p>
       ) : null}
       {state === 'speaking' ? (

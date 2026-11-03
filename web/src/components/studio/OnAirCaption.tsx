@@ -1,21 +1,35 @@
-import type { Participant, LiveUtterance } from '@aps/shared';
+import type {
+  DiscussionStatus,
+  LiveUtterance,
+  Participant
+} from '@aps/shared';
 import { Mic2, Radio } from 'lucide-react';
 import { Avatar } from '../ui/Avatar';
 
 interface OnAirCaptionProps {
   liveUtterance: LiveUtterance | null;
   participants: Participant[];
+  status: DiscussionStatus;
 }
 
 export function OnAirCaption({
   liveUtterance,
-  participants
+  participants,
+  status
 }: OnAirCaptionProps) {
-  const speaker = liveUtterance
+  const isStopped = status === 'paused' || status === 'ended';
+  const visibleUtterance = isStopped ? null : liveUtterance;
+  const speaker = visibleUtterance
     ? participants.find(
-        (participant) => participant.id === liveUtterance.participantId
+        (participant) => participant.id === visibleUtterance.participantId
       )
     : undefined;
+  const captionText =
+    status === 'ended'
+      ? '讨论已结束'
+      : status === 'paused'
+        ? '讨论已暂停'
+        : visibleUtterance?.text || '等待下一位发言…';
 
   return (
     <section
@@ -26,9 +40,11 @@ export function OnAirCaption({
     >
       <div className="on-air-caption__label">
         <span className="on-air-caption__icon">
-          {liveUtterance ? <Mic2 size={15} /> : <Radio size={15} />}
+          {visibleUtterance ? <Mic2 size={15} /> : <Radio size={15} />}
         </span>
-        <span>{liveUtterance?.act === 'closing' ? '主持人总结' : '现场字幕'}</span>
+        <span>
+          {visibleUtterance?.act === 'closing' ? '主持人总结' : '现场字幕'}
+        </span>
       </div>
       {speaker ? (
         <div className="on-air-caption__speaker">
@@ -39,9 +55,13 @@ export function OnAirCaption({
           </div>
         </div>
       ) : null}
-      <p className={liveUtterance ? 'on-air-caption__text is-live' : 'on-air-caption__text'}>
-        {liveUtterance?.text || '等待下一位发言…'}
-        {liveUtterance ? (
+      <p
+        className={
+          visibleUtterance ? 'on-air-caption__text is-live' : 'on-air-caption__text'
+        }
+      >
+        {captionText}
+        {visibleUtterance ? (
           <span className="caption-cursor" aria-hidden="true" />
         ) : null}
       </p>

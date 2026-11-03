@@ -18,6 +18,7 @@ import type { ConnectionStatus } from '../state/eventSource';
 import { StudioHeader } from '../components/studio/StudioHeader';
 import { StageArena } from '../components/studio/StageArena';
 import { OnAirCaption } from '../components/studio/OnAirCaption';
+import { StudioDesktopPanel } from '../components/studio/StudioDesktopPanel';
 import { TranscriptPanel } from '../components/studio/TranscriptPanel';
 import { InsightsPanel } from '../components/studio/InsightsPanel';
 import { SummaryPanel } from '../components/studio/SummaryPanel';
@@ -146,27 +147,6 @@ function StudioSession({
     }, 680);
   };
 
-  const summaryPanel =
-    state.discussion.status === 'summarizing' ||
-    state.discussion.status === 'ended' ? (
-      <SummaryPanel
-        snapshot={state}
-        liveSummary={
-          state.liveUtterance?.act === 'closing'
-            ? state.liveUtterance.text
-            : ''
-        }
-        onBack={() => navigate('/')}
-      />
-    ) : null;
-
-  const insightPanel = (
-    <InsightsPanel
-      insights={state.insights}
-      participants={state.participants}
-      version={state.insightsVersion}
-    />
-  );
   const transcriptPanel = (
     <TranscriptPanel
       participants={state.participants}
@@ -196,19 +176,27 @@ function StudioSession({
       >
         <div className="studio-stage-column">
           <StageArena
+            discussionStatus={state.discussion.status}
             liveSpeakerId={state.liveUtterance?.participantId}
             participants={state.participants}
           />
           <OnAirCaption
             liveUtterance={state.liveUtterance}
             participants={state.participants}
+            status={state.discussion.status}
           />
         </div>
         <div className="studio-transcript-desktop">{transcriptPanel}</div>
-        <aside className="studio-insights-desktop">
-          {summaryPanel}
-          {insightPanel}
-        </aside>
+        <StudioDesktopPanel
+          insightsVersion={state.insightsVersion}
+          liveSummary={
+            state.liveUtterance?.act === 'closing'
+              ? state.liveUtterance.text
+              : ''
+          }
+          onBack={() => navigate('/')}
+          snapshot={state}
+        />
         <section className="studio-mobile-content">
           <Tabs
             ariaLabel="演播厅信息面板"
