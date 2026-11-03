@@ -1,5 +1,14 @@
-import type { BidIntent } from '@aps/shared';
+import {
+  EXPERT_ACTS,
+  type BidIntent,
+  type ExpertAct,
+  type Participant,
+  type SpeechAct,
+  type Utterance
+} from '@aps/shared';
 import type { NormalizedBid } from './bid';
+
+export const ACT_VARIETY_WINDOW = 3;
 
 export const SCHEDULER_WEIGHTS = {
   intent: {
@@ -12,6 +21,7 @@ export const SCHEDULER_WEIGHTS = {
   interruptBonus: 0.3,
   recentExpertSpeakerPenalty: 0.25,
   fairnessBonus: 0.15,
+  actVarietyBonus: 0.25,
   addressedBonus: 0.6,
   randomJitter: 0.05
 } as const;
@@ -20,6 +30,7 @@ export interface SchedulerInput {
   bids: readonly NormalizedBid[];
   lastSpeakerId: string | null;
   recentExpertSpeakerIds: readonly string[];
+  recentExpertActs?: readonly ExpertAct[];
   lastSpokeTurn: Readonly<Record<string, number>>;
   turnIndex: number;
   addressedParticipantId: string | null;
@@ -41,6 +52,45 @@ export interface SpeakerPick {
 interface Candidate {
   bid: NormalizedBid;
   score: number;
+}
+
+function isExpertAct(act: SpeechAct): act is ExpertAct {
+  return (EXPERT_ACTS as readonly SpeechAct[]).includes(act);
+}
+
+export function getRecentExpertActs(
+  utterances: readonly Pick<
+    Utterance,
+    'seq' | 'participantId' | 'act'
+  >[],
+  participants: readonly Pick<Participant, 'id' | 'role'>[]
+): ExpertAct[] {
+  const expertIds = new Set(
+    participants
+      .filter(({ role }) => role === 'expert')
+      .map(({ id }) => id)
+  );
+  return utterances
+    .flatMap(({ seq, participantId, act }) => {
+      if (!expertIds.has(participantId) || !isExpertAct(act)) {
+        return [];
+      }
+      return [{ seq, act }];
+    })
+    .toSorted((left, right) => left.seq - right.seq)
+    .slice(-ACT_VARIETY_WINDOW)
+    .map(({ act }) => act);
+}
+
+function actForIntent(intent: BidIntent): ExpertAct {
+  switch (intent) {
+    case 'raise_hand':
+      return 'statement';
+    case 'interrupt':
+    case 'supplement':
+    case 'rebut':
+      return intent;
+  }
 }
 
 export function selectNextSpeaker(
@@ -101,6 +151,12 @@ export function selectNextSpeaker(
     }
     if (input.recentExpertSpeakerIds.includes(participantId)) {
       score -= SCHEDULER_WEIGHTS.recentExpertSpeakerPenalty;
+    }
+    if (
+      input.recentExpertActs?.length &&
+      !input.recentExpertActs.includes(actForIntent(bid.intent))
+    ) {
+      score += SCHEDULER_WEIGHTS.actVarietyBonus;
     }
 
     const previousTurn = input.lastSpokeTurn[participantId];

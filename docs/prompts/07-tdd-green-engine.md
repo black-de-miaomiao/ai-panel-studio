@@ -170,3 +170,41 @@
 4. 结束前按 PID 停掉所有服务进程，确认端口已释放。
 
 约束：不读取、打印或修改 `server/.env`；不安装依赖；只改 `server/`（不含 `server/src/llm/mock*`）、`docs/RUNTIME-PROMPTS.md` 和 `_review\live\` 下你自己的脚本；不改 `shared/`、`web/`、`docs/prompts/` 和其他规格文档；不提交 git。报告：改动文件、两项修复的做法与对应测试、修正过的测试断言及依据、mock 联调结果、DeepSeek 运行数据与观察、遗留问题。
+
+---
+
+## 续派 3（编排者审查续派 2 并提交 4f40e75 后，resume 同一子代理）
+
+续派 2 已审查通过并提交（4f40e75）。编排者复跑时又遇到一个依赖随机种子的用例偶发失败（「专家正文发言至少覆盖两种发言行为」），已按你处理洞察用例的方式固定 Runner RNG 和 mock 使用的讨论 ID，断言不变；之后 server 全量用例连续 8 次通过。run-5 留下的两个问题这次处理。规格已由编排者先行修订：ARCHITECTURE §5.C、§5.1、§8.2，TEST-PLAN 的 AC-F3-2 行、§3 的 C 行与 runner 行、§4 故障注入，RUNTIME-PROMPTS 出价一节的“输出与校验”。先读这些改动再动手；本次不改 `docs/` 下的任何文件，发现规格仍有矛盾时在报告中指出。
+
+### 1. 【健壮性】出价格式失败要重试 1 次
+
+现状：run-5 有 5 次出价失败，类别都是“JSON 解析失败”。网关对 bid 已开启 `response_format: json_object`；DeepSeek 文档说明，JSON 模式下模型输出不是合法 JSON 时，API 会把内容替换成空格，返回的 content 看起来是空的（finish_reason 仍可能是 stop），建议代码遇到空白内容时重试。ARCHITECTURE §7.1 早已写明“JSON 任务失败重试 1 次”，但 §8.2 的出价一行没有写，实现也没有重试；§8.2 现已统一。要求：
+
+- 只在 `parseJsonLoose` 抛出 `LLMFormatError` 时，用同一 Prompt 立即重试 1 次，并采用重试结果。请求错误（网络、429、5xx、超时）已由网关处理，Runner 不再额外重试；能解析但字段无效时仍走 `normalizeBid` 的默认值。
+- 重试后仍无法解析，才按现有路径处理：记失败日志、小窗回到 idle、本轮视为不发言；一轮全部出价都失败时计一次失败轮次。讨论已暂停、结束、停止或删除时不再发起重试。
+- 诊断：格式失败的日志增加 `contentLength=<字符数>`（只记长度，不记内容），用来区分空白内容与非 JSON 文本；`APS_REPORT_BID_METRICS=1` 时另外输出格式失败次数、重试成功次数、重试后仍失败次数。
+- 测试（`server/src/engine/runner.test.ts`，先红后绿）：
+  - 「出价返回无法解析的内容时重试一次并采用重试结果」：包装 provider，让某位专家第一次出价返回只含空格的内容、第二次返回想发言的有效 JSON；断言这位专家这一轮的出价请求恰好 2 次，并且重试结果参与了调度（例如小窗出现对应意图，或该专家被选中发言）。
+  - 「出价重试后仍无法解析时视为本轮不发言且其余专家正常调度」：某位专家的出价始终返回非 JSON；断言每轮对它最多请求 2 次，讨论正常推进到结束，没有因此暂停。
+  - 已有的「连续三轮出价任务失败后暂停广播错误且不新增正文发言」保持通过（它注入的是请求错误，不会触发格式重试）。
+
+### 2. 【质量】补充几乎不可能胜出
+
+现状：run-5 有 7 次想发言的 supplement 出价，正文 supplement 0 条；run-2 也是 0 条。按 §5.C 的打分，rebut 的意图权重是 0.30、supplement 是 0.15，反驳出价的 urgency 通常也更高，所以只要同一轮有人想反驳，补充几乎不会胜出，演播厅里很少看到“补充”。已修订的规格（§5.C、§5.1）：
+
+- `SchedulerInput` 增加可选的 `recentExpertActs`：最近 3 条专家正文发言的 act，按时间正序，不含主持人发言、开场与总结；省略时视为空。
+- 出价对应的发言行为（`raise_hand` 记为 `statement`）不在 `recentExpertActs` 中时，加 `SCHEDULER_WEIGHTS.actVarietyBonus = 0.25`；`recentExpertActs` 为空时不加。窗口大小 `ACT_VARIETY_WINDOW = 3` 与权重一起从 `server/src/core/scheduler.ts` 导出。其他权重不变。
+- Runner 从持久化的发言计算 `recentExpertActs`（与抢答额度一样，重启恢复后结果一致）。把计算写成纯函数并单测：只取专家正文，主持人插话、开场与总结不计入；取最近 3 条；按时间正序。
+- 测试（`server/src/core/scheduler.test.ts`，标题用「最近三条专家正文未出现的发言行为获得多样性加分」，TEST-PLAN 已按此标题映射）：同一组出价（rebut 与 supplement 都回应上一位发言人，rng 固定返回 0），`recentExpertActs` 为 `['rebut', 'rebut', 'statement']` 时 supplement 胜出，为 `['supplement', 'rebut', 'statement']` 时 rebut 胜出；另断言 raise_hand 按 statement 判断、空窗口不加分。数值请按 §5.C 的表手算后再写，避免依赖并列裁决。
+- 已有的 scheduler 用例应保持通过（它们不传 `recentExpertActs`，按空窗口处理）。runner 用例如果因为调度结果变化而失败，先确认是否只是依赖了某个随机结果；可以固定种子，但不能放宽断言；确需修改时写明原断言 → 新断言 → 依据。
+- 不要改 `server/src/llm/mock*`：随后的 06e 会在新的调度规则下调整 mock。
+
+### 验证
+
+1. 根目录 `npm run typecheck`；`npm test -w @aps/server` 连续 2 次全绿，报告用例总数。
+2. 用 `_review\live\run-discussion.mjs` 重跑 mock 全流程、并发、重连、控制操作与重启恢复（端口 8796 或 8797，临时数据库；暂停与恢复检查可以沿用续派 2 的节奏参数），报告正文 act 分布。
+3. 真实 DeepSeek 跑第 6 次（记录到 `_review\live\deepseek-run-6.md`），配置同前：`MAX_TURNS=12`、`PACING_MS=800`、同一话题、4 位专家，并设置 `APS_REPORT_BID_METRICS=1`。目标：supplement 正文 ≥ 1；rebut ≥ 2；interrupt 1–2 条且不相邻；重试后仍失败的出价 ≤ 1；run-5 已达到的检查仍然达到。报告：各意图的出价数与正文数、格式失败次数与 contentLength 分布、重试成功与仍失败的次数、洞察条数（共识 / 分歧）、与 run-4、run-5 的对比。只跑这 1 次，不达标也不要重跑，在报告中分析原因并给出建议。
+4. 结束前按 PID 停掉所有服务进程，确认端口已释放。
+
+约束：不读取、打印或修改 `server/.env`；不安装依赖；只改 `server/`（不含 `server/src/llm/mock*`）和 `_review\live\` 下你自己的脚本；不改 `shared/`、`web/`、`docs/`；不提交 git。报告：改动文件、两项修改的做法与对应测试、修正过的测试断言及依据、mock 联调结果、DeepSeek 运行数据与观察、遗留问题。

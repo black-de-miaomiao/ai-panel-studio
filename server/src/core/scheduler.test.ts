@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { createRng } from './rng';
 import type { NormalizedBid } from './bid';
 import {
+  ACT_VARIETY_WINDOW,
   SCHEDULER_WEIGHTS,
+  getRecentExpertActs,
   selectNextSpeaker,
   type SchedulerInput
 } from './scheduler';
@@ -48,6 +50,71 @@ function input(
 }
 
 describe('selectNextSpeaker', () => {
+  it('最近三条专家正文未出现的发言行为获得多样性加分', () => {
+    const bids = [
+      bid('e1', {
+        intent: 'rebut',
+        urgency: 0.6,
+        replyToParticipantId: 'e4'
+      }),
+      bid('e2', {
+        intent: 'supplement',
+        urgency: 0.6,
+        replyToParticipantId: 'e4'
+      })
+    ];
+    const common = {
+      lastSpeakerId: 'e4',
+      recentExpertSpeakerIds: [],
+      lastSpokeTurn: { e1: 5, e2: 5 },
+      turnIndex: 5,
+      rng: () => 0
+    } satisfies Partial<SchedulerInput>;
+    const supplementPick = selectNextSpeaker(
+      input(bids, {
+        ...common,
+        recentExpertActs: ['rebut', 'rebut', 'statement']
+      })
+    );
+    const rebutPick = selectNextSpeaker(
+      input(bids, {
+        ...common,
+        recentExpertActs: ['supplement', 'rebut', 'statement']
+      })
+    );
+
+    expect(ACT_VARIETY_WINDOW).toBe(3);
+    expect(SCHEDULER_WEIGHTS.actVarietyBonus).toBe(0.25);
+    expect(supplementPick?.participantId).toBe('e2');
+    expect(supplementPick?.score).toBeCloseTo(1.2);
+    expect(rebutPick?.participantId).toBe('e1');
+    expect(rebutPick?.score).toBeCloseTo(1.1);
+  });
+
+  it('举手按 statement 判断且空窗口不加多样性分', () => {
+    const bids = [bid('e1', { intent: 'raise_hand', urgency: 0.5 })];
+    const common = {
+      lastSpeakerId: 'host',
+      lastSpokeTurn: { e1: 5 },
+      turnIndex: 5,
+      rng: () => 0
+    };
+    const statementMissing = selectNextSpeaker(
+      input(bids, { ...common, recentExpertActs: ['rebut'] })
+    );
+    const statementSeen = selectNextSpeaker(
+      input(bids, { ...common, recentExpertActs: ['statement'] })
+    );
+    const emptyWindow = selectNextSpeaker(
+      input(bids, { ...common, recentExpertActs: [] })
+    );
+
+    expect(statementMissing?.participantId).toBe('e1');
+    expect(statementMissing?.score).toBeCloseTo(0.85);
+    expect(statementSeen?.score).toBeCloseTo(0.6);
+    expect(emptyWindow?.score).toBeCloseTo(0.6);
+  });
+
   it('无人愿意发言且没有被点名专家时返回空', () => {
     expect(
       selectNextSpeaker(
@@ -299,5 +366,31 @@ describe('selectNextSpeaker', () => {
       (speaker, index) => index < participantIds.length || speaker === sequence[index % 4]
     );
     expect(repeatsSeatCycle).toBe(false);
+  });
+});
+
+describe('getRecentExpertActs', () => {
+  it('只取最近三条专家正文 act 并按时间正序返回', () => {
+    const participants = [
+      { id: 'host', role: 'host' },
+      { id: 'e1', role: 'expert' }
+    ] as const;
+    const utterances = [
+      { seq: 6, participantId: 'e1', act: 'interrupt' },
+      { seq: 2, participantId: 'host', act: 'statement' },
+      { seq: 9, participantId: 'host', act: 'closing' },
+      { seq: 3, participantId: 'e1', act: 'supplement' },
+      { seq: 4, participantId: 'host', act: 'opening' },
+      { seq: 1, participantId: 'e1', act: 'statement' },
+      { seq: 5, participantId: 'e1', act: 'rebut' },
+      { seq: 7, participantId: 'e1', act: 'closing' },
+      { seq: 8, participantId: 'e1', act: 'bridge' }
+    ] as const;
+
+    expect(getRecentExpertActs(utterances, participants)).toEqual([
+      'supplement',
+      'rebut',
+      'interrupt'
+    ]);
   });
 });

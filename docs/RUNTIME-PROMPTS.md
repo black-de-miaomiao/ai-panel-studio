@@ -91,7 +91,7 @@
 
 Runner 按 `max(1, floor(maxTurns / 6))` 计算每场上限；`usedCount` 只统计已持久化的专家 interrupt 正文，opening/closing 不计入，恢复运行时从 transcript 重新统计。最近一条正文 act 是 interrupt 时本轮也不允许 interrupt；主持人正文插话会解除相邻限制，但不恢复已用额度。`interruptAvailabilityLine` 向模型说明已用次数、上限和本轮许可；额度用完或上一条正文 act 为 interrupt 时，明确要求本轮不用 interrupt。Runner 在出价规范化后、推送 `participant.state` 前再次强制执行同一规则，将受限的正向 interrupt 出价改为 rebut，其他字段不变；只有最终持久化的 interrupt 正文才消耗额度。
 
-**输出与校验：** JSON 字段为 `wantToSpeak`、`intent`、`urgency`、`replyTo`、`focus`。经 `parseJsonLoose` 后由 `normalizeBid` 校验意愿、意图、紧急度与别名；未知别名和指向本人会清空回应对象，关注点最多 40 字。模型提示将公开 focus 收紧到 20 字。格式无效时可用规范化函数的默认不发言值兜底。
+**输出与校验：** JSON 字段为 `wantToSpeak`、`intent`、`urgency`、`replyTo`、`focus`。经 `parseJsonLoose` 后由 `normalizeBid` 校验意愿、意图、紧急度与别名；未知别名和指向本人会清空回应对象，关注点最多 40 字。模型提示将公开 focus 收紧到 20 字。返回内容无法解析为 JSON 时（DeepSeek 的 JSON 模式遇到非 JSON 输出会返回只含空格的内容），Runner 用同一 Prompt 立即重试 1 次，仍失败则视为该专家本轮不发言；能解析但字段无效时由 `normalizeBid` 的默认值兜底。
 
 **防幻觉与调整原因：** 只能回应真实 transcript；`interrupt` 需要同时满足“上一条是专家发言、方向相反或直接否定核心立场、有具体反驳点且 urgency ≥ 0.85、本轮允许抢答”；其余具体反驳用 `rebut`，补充需增加条件或例子。若本场尚无抢答且额度允许，user 指令会鼓励满足条件时优先选择 interrupt。run3 曾出现 3 次 interrupt、0 次 rebut 和 3 次固定“等一下”开头；run4 收紧措辞后约 40 次出价没有 interrupt。为避免只靠措辞在两端摆动，本次由 Runner 管额度与相邻约束，Prompt 只给可验证的触发条件。焦点只描述公开关注点，不是推理过程。
 
@@ -342,11 +342,29 @@ Runner 按 `max(1, floor(maxTurns / 6))` 计算每场上限；`usedCount` 只统
 - 专家 act：`statement=4 / rebut=5 / supplement=0`；`interrupt=0`；主持插话 3 次；发言数 `2/2/2/3`。洞察 2 条，均为分歧；第一条在第 2 条正文前后时序检查通过。总结点名 4 位发言专家，复述两个分歧且未把角色卡立场写成未发言嘉宾观点。
 - 没有 supplement 触发 §2.8 relation 风险修复：当时代码仍把“有条件支持”与“支持”视为不同，出价 prompt 同时强调“立场不同优先 rebut”，容易把同向的条件化立场推向反驳。之后改为按方向比较并在上下文同时提供 stance 原文；`mock.ts` 对方向相同/相反/中性分支同步适配，单测覆盖三类结果。
 
-### Wave4b / Prompt 07 DeepSeek HTTP+SSE 联调（run 3，最后一次）
+### Wave4b / Prompt 07 DeepSeek HTTP+SSE 联调（run 3）
 
-完整记录：`C:\Users\123\Desktop\mianshiti\_review\live\deepseek-run-3.md`。使用 `MAX_TURNS=12`、`PACING_MS=800`，包括方向关系修正。此为允许的第 3 次、也是最后一次真实整场运行。
+完整记录：`C:\Users\123\Desktop\mianshiti\_review\live\deepseek-run-3.md`。使用 `MAX_TURNS=12`、`PACING_MS=800`，包括方向关系修正。此为 Prompt 07 首轮派发允许的第 3 次、也是该轮最后一次真实整场运行。
 
 - 耗时：阵容 20.622s；首位专家发言 4.014s；平均每条正文 7.938s；总结 16.651s；整场 115.933s。
 - 专家 act：`statement=4 / interrupt=3 / supplement=1 / rebut=0`；主持插话 4 次；专家发言数 `2/1/4/1`。出现 3 次 interrupt 与 1 次 supplement，洞察 3 条（2 共识、1 分歧），首条洞察在第 3 条正文之前。总结点名 4 位发言专家，人工复核认为洞察与摘要对应；完整发言序列没有同一专家连续发言（周明远 #4 与 #6 之间有主持追问 #5）。
 - 未达标：缺少 `rebut`；三次“等一下”开头，重复句式超过 2 次。原记录中的 no-consecutive 与句式布尔值受联调脚本启发式漏检影响，已在记录的人工复核补充及脚本中更正。
 - 原因与最后调整：方向修正后即时反驳过多被模型归为 interrupt，通用 `interrupt` act guidance 还给出重复“等一下”的示例。最后将一般具体反驳明确为 rebut 默认项、仅在延后回应会导致误解/遗漏时才使用 interrupt，并禁止复用固定插话开头。第三次运行已达到限制，因此最后的 prompt 修改仅经提示词单测/typecheck 验证，没有新的真实运行结果；不声称全部质量目标通过。
+
+### Wave4b / Prompt 07 续派 1–3 DeepSeek 联调（run 4–6）
+
+首轮派发的 3 次用完后，编排者在续派 1、2、3 中各批准 1 次整场运行，每次只针对上一次暴露的问题修改。三次配置相同：`MAX_TURNS=12`、`PACING_MS=800`、4 位专家、同一话题；run 5 起设置 `APS_REPORT_BID_METRICS=1` 统计出价。完整记录在仓库外 `C:\Users\123\Desktop\mianshiti\_review\live\deepseek-run-4.md` 至 `deepseek-run-6.md`。
+
+| 指标 | run 4（续派 1） | run 5（续派 2） | run 6（续派 3） |
+|---|---|---|---|
+| 运行前的改动 | 总结改为流式；最后 1 轮正文只能由专家发言；开场不点名首位发言人 | Runner 管抢答额度（每场 `max(1, floor(maxTurns / 6))` 次，不相邻）；出价 Prompt 给出可核对的 interrupt 条件 | 出价格式失败重试 1 次（§8.2）；调度增加行为多样性加成（§5.C） |
+| 专家正文 act（statement / rebut / supplement / interrupt） | 3 / 5 / 1 / 0 | 3 / 5 / 0 / 1 | 2 / 5 / 1 / 1 |
+| 想发言的出价（raise_hand / rebut / supplement / interrupt） | 未统计 | 5 / 13 / 7 / 1 | 6 / 11 / 10 / 1 |
+| 出价格式失败 | 未统计 | 5 次，未重试，均按不发言处理 | 5 次，重试全部成功 |
+| 洞察（共识 / 分歧） | 1 / 3 | 0 / 2 | 0 / 2 |
+| 整场用时 | 61 秒 | 59 秒 | 61 秒 |
+
+- run 4：总结流式输出（467 个 delta，跨 10.2 秒），最后一条正文来自专家；整场没有抢答。续派 2 因此改由 Runner 管抢答额度，Prompt 只给可核对的触发条件。
+- run 5：抢答 1 次，不相邻，没有固定开头；但 7 次想补充的出价没有一次胜出。原因在 §5.C 的打分：rebut 的意图权重 0.30 高于 supplement 的 0.15，反驳出价的 urgency 通常也更高。另有 5 次出价返回无法解析的内容：DeepSeek 的 JSON 模式在模型输出不是合法 JSON 时会返回空白内容，官方建议重试。续派 3 据此增加出价格式重试和行为多样性加成。
+- run 6：5 次格式失败都被一次重试恢复（日志只记录内容长度，为 97–248 个字符，不记录内容）；补充、反驳、抢答都出现；最后一条正文来自专家；总结 4 段，512 个 delta，跨 8.9 秒。单次运行不足以证明长期改善，没有据此再调权重。
+- 已知不足：run 5、run 6 都没有共识条目。run 6 第 9 条是赵启航承接孙梦琪“返工成本”前提后的补充，按洞察 Prompt 的“supplement 承接前提”规则本应记一条局部共识，fast 档模型没有记录。另外两次主持人串联用了同一句“你怎么回应启航这个说法？”，第 10、12 条两位专家的反驳论点相近。这些记为已知限制，没有再调用模型。

@@ -256,7 +256,7 @@ stateDiagram-v2
 
 ### C. 调度打分 v1 `selectNextSpeaker(input)`
 
-- **输入：** `bids`（每位专家规范化后的出价）、`lastSpeakerId`（上一条发言人，可能是主持人）、`recentExpertSpeakerIds`（最近 2 条专家发言的发言人）、`lastSpokeTurn`（专家 ID → 最近一次发言所在的 turn 序号，未发言则无）、`turnIndex`、`addressedParticipantId`（主持人刚点名的专家，可空）、`rng`（返回 `[0,1)` 的函数，可注入以便测试）。
+- **输入：** `bids`（每位专家规范化后的出价）、`lastSpeakerId`（上一条发言人，可能是主持人）、`recentExpertSpeakerIds`（最近 2 条专家发言的发言人）、`recentExpertActs`（最近 `ACT_VARIETY_WINDOW` = 3 条专家正文发言的 act，按时间正序，不含主持人发言、开场与总结；可省略，省略时视为空）、`lastSpokeTurn`（专家 ID → 最近一次发言所在的 turn 序号，未发言则无）、`turnIndex`、`addressedParticipantId`（主持人刚点名的专家，可空）、`rng`（返回 `[0,1)` 的函数，可注入以便测试）。
 - 被点名专家若没有出价或 `wantToSpeak=false`，视为一条 `raise_hand`、`urgency=0.5` 的出价。
 - 候选必须 `wantToSpeak=true`，并且不是 `lastSpeakerId`；上一条若是主持人则不排除任何专家。无候选返回 `null`。
 - 对每位候选使用以下分数相加：
@@ -269,13 +269,14 @@ stateDiagram-v2
 | 抢答加成 | `intent=interrupt` 且 `urgency ≥ 0.8` | `+0.30` |
 | 最近发言惩罚 | 专家 ID 在 `recentExpertSpeakerIds` 中 | `−0.25` |
 | 公平加成 | 从未发言或距上次发言 ≥ 4 轮（由 `turnIndex` 与 `lastSpokeTurn` 判断） | `+0.15` |
+| 行为多样性加成 | 出价对应的发言行为（`raise_hand` 记为 `statement`）不在 `recentExpertActs` 中；`recentExpertActs` 为空时不加 | `+0.25` |
 | 被点名加成 | 专家 ID 等于 `addressedParticipantId` | `+0.60` |
 | 随机扰动 | 用注入的 `rng()` | `+rng() × 0.05` |
 
 - 返回得分最高者 `{ participantId, intent, replyToParticipantId, score }`。
 - 总分相同（包括加入 `rng` 扰动后仍相同）时，依次比较：`urgency` 较高者优先，再由 `seat` 较小者优先。
-- 所有权重以常量 `SCHEDULER_WEIGHTS` 导出。
-- 设计意图：由“谁更想说、说什么”决定发言顺序，而非按座位轮流；硬规则保证同一专家不会连续两次发言。
+- 所有权重以常量 `SCHEDULER_WEIGHTS` 导出，多样性窗口大小以常量 `ACT_VARIETY_WINDOW` 导出，两者都在 `server/src/core/scheduler.ts`。
+- 设计意图：由“谁更想说、说什么”决定发言顺序，而非按座位轮流；硬规则保证同一专家不会连续两次发言。行为多样性加成只在最近几条专家正文都没有出现某种发言行为时起作用，让一直在反驳时的补充（或一直在补充时的反驳）有机会胜出，避免整场只有一种交锋方式。
 
 ### D. 主持人策略 `decideHostAction(ctx)`
 
@@ -378,7 +379,7 @@ stateDiagram-v2
 | `EXPERT_PALETTE` | `['#5B9DFF', '#FF6B9A', '#3DDC97', '#B18CFF', '#FF9F43', '#2ED3E6']` |
 | 主持人颜色 | `#E8C872` |
 
-`SCHEDULER_WEIGHTS` 的含义和值由 C 节权重表固定：`rebut 0.30`、`interrupt 0.25`、`supplement 0.15`、`raise_hand 0.10`、直接回应 `0.20`、抢答加成 `0.30`、最近发言惩罚 `0.25`、公平加成 `0.15`、被点名加成 `0.60`、随机扰动系数 `0.05`。
+`SCHEDULER_WEIGHTS` 的含义和值由 C 节权重表固定：`rebut 0.30`、`interrupt 0.25`、`supplement 0.15`、`raise_hand 0.10`、直接回应 `0.20`、抢答加成 `0.30`、最近发言惩罚 `0.25`、公平加成 `0.15`、行为多样性加成 `0.25`、被点名加成 `0.60`、随机扰动系数 `0.05`；行为多样性窗口 `ACT_VARIETY_WINDOW` 为 `3`。
 
 ## 6. 技术栈、LLM 网关与模型路由
 
@@ -740,7 +741,7 @@ JSON 输出：
 
 | 环节 | 规定行为 |
 |---|---|
-| 专家出价 | 单次出价失败视为该专家本轮不发言，不中止其他专家出价或主循环。若一轮中全部专家的出价请求都失败（请求错误，而不是不想发言），该轮计为一次失败轮次，不置 `noBidders`。 |
+| 专家出价 | 返回内容无法解析为 JSON（`LLMFormatError`）时，立即用同一 Prompt 重试 1 次：DeepSeek 的 JSON 模式在模型输出不是合法 JSON 时会把内容替换为空格，返回看起来是空内容，官方建议代码重试。请求错误（网络、429、5xx、超时）只按网关规则重试，Runner 不再额外重试；能解析但字段无效时按 §5.B 的默认值处理。重试后仍无法解析或请求最终出错时，视为该专家本轮不发言，不中止其他专家出价或主循环。若一轮中全部专家的出价请求都失败（请求错误或重试后仍无法解析，而不是不想发言），该轮计为一次失败轮次，不置 `noBidders`。 |
 | 发言生成 | 失败重试 1 次；仍失败则推送瞬时 `error`（「某嘉宾暂时掉线，讨论继续」）、跳过本轮且不计 `turnCount`。 |
 | 连续发言失败 | 发言失败轮次与“全部出价失败”轮次共用一个连续失败计数，任一条发言成功即清零。连续 3 轮失败后状态转为 `paused`，`error_message` 写「大模型服务暂时不可用，讨论已暂停，可稍后继续」。 |
 | 洞察提炼 | 失败记日志；下次触发时把遗漏的发言一并处理，不阻塞主循环。 |

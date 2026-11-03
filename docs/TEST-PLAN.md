@@ -26,7 +26,7 @@
 | AC-F2-6 | `server/src/core/json.test.ts`：「解析纯 JSON 对象」「解析带 json 标记的代码围栏」；`server/src/routes/api.test.ts`：「创建成功后返回默认四位专家及已分配角色颜色和头像」 | 页面显示嘉宾信息而不是模型 JSON 原文。 |
 | AC-F2-7 | `server/src/routes/api.test.ts`：「待开播讨论换一批失败时保留原阵容与状态且仍可开播」 | 换一批请求失败（路由拦截返回 502）后仍显示原阵容和中文错误，「确认阵容，进入演播厅」可以进入演播厅。 |
 | AC-F3-1 | `server/src/engine/runner.test.ts`：「完整运行后从直播经总结结束且开场收尾与正文计数符合上限」；`server/src/routes/api.test.ts`：「开播仅允许 lineup_ready 且重复开播返回冲突」 | 确认阵容后状态进入直播，第一条 Transcript 发言为主持人开场。 |
-| AC-F3-2 | `server/src/core/scheduler.test.ts`：「上一位专家即使出价最高也不能连续发言」「紧急度相同时直接反驳上一位发言人的出价胜过普通举手」「三十轮中按出价形成非机械且无固定座位周期的发言序列」；`server/src/core/hostPolicy.test.ts`：「上一条发言来自主持人且上一轮无人出价时仍邀请最少发言专家」；`server/src/engine/runner.test.ts`：「连续两条专家发言不会由同一专家完成」「开场后首轮无人出价时主持人点名并继续至正常结束」 | 观察多轮对话可见由观点与出价驱动的非机械轮转。 |
+| AC-F3-2 | `server/src/core/scheduler.test.ts`：「上一位专家即使出价最高也不能连续发言」「紧急度相同时直接反驳上一位发言人的出价胜过普通举手」「三十轮中按出价形成非机械且无固定座位周期的发言序列」「最近三条专家正文未出现的发言行为获得多样性加分」；`server/src/core/hostPolicy.test.ts`：「上一条发言来自主持人且上一轮无人出价时仍邀请最少发言专家」；`server/src/engine/runner.test.ts`：「连续两条专家发言不会由同一专家完成」「开场后首轮无人出价时主持人点名并继续至正常结束」 | 观察多轮对话可见由观点与出价驱动的非机械轮转。 |
 | AC-F3-3 | `server/src/engine/runner.test.ts`：「每条完成事件之前先有同 ID 的开始事件且 speaking 只标记当前发言人」；`server/src/routes/stream.test.ts`：「直播讨论能够接收发言开始增量和完成事件」 | 字幕展示增量，收到完成事件后以最终文本替换。 |
 | AC-F3-4 | `server/src/engine/runner.test.ts`：「暂停后至多完成当前一条发言并在继续后恢复至结束」「连续三轮出价任务失败后暂停广播错误且不新增正文发言」；`server/src/routes/api.test.ts`：「暂停继续和结束遵守状态转换并拒绝结束态暂停」 | 暂停等待当前发言结束，继续后恢复讨论。 |
 | AC-F3-5 | `server/src/engine/runner.test.ts`：「完整运行后从直播经总结结束且开场收尾与正文计数符合上限」「直播中请求结束会进入总结并以少于上限的正文发言数结束」；`server/src/routes/api.test.ts`：「暂停继续和结束遵守状态转换并拒绝结束态暂停」 | 达到上限或用户结束后出现总结并进入回放。 |
@@ -55,7 +55,7 @@
 |---|---|
 | A. 阵容字段清洗、截断、专家人数、多样性、重名、颜色、座位和头像 | `server/src/core/lineup.test.ts` |
 | B. 出价默认值、意图、布尔值、紧急度、回应别名和关注点 | `server/src/core/bid.test.ts` |
-| C. 直接回应、抢答、最近发言、公平、点名、随机扰动、并列裁决与非轮转 | `server/src/core/scheduler.test.ts`；权重由 `server/src/core/scheduler.ts` 的 `SCHEDULER_WEIGHTS` 明确导出 |
+| C. 直接回应、抢答、最近发言、公平、行为多样性、点名、随机扰动、并列裁决与非轮转 | `server/src/core/scheduler.test.ts`；权重与多样性窗口由 `server/src/core/scheduler.ts` 的 `SCHEDULER_WEIGHTS`、`ACT_VARIETY_WINDOW` 明确导出 |
 | D. 主持人优先级、间隔、分歧串联、未发言邀请与 seat 并列规则 | `server/src/core/hostPolicy.test.ts`，含上一条为主持人时 `noBidders` 仍优先邀请的用例 |
 | E. 洞察有效专家与证据、引用更新、模糊相似度、解决状态、保留及上限裁剪 | `server/src/core/insights.test.ts` |
 | F. 发言人前缀、整体引号、Markdown、空白、小数点、句末符号、120 字兜底及流式限句 | `server/src/core/sentences.test.ts` |
@@ -64,7 +64,7 @@
 | LLM 任务档位、思考模式、温度、maxTokens 透传、并发与 JSON 标志 | `server/src/llm/gateway.test.ts` |
 | OpenAI 兼容请求、思考模式字段映射、Reasoning 丢弃、SSE 分片、重试、密钥保护与超时 | `server/src/llm/openaiCompatible.test.ts` |
 | Mock 确定性、任务结构、真实关系证据、流式一致性与故障注入 | `server/src/llm/mock.test.ts` |
-| 讨论运行、暂停/结束、抢答额度、洞察重试、错误恢复及并行隔离 | `server/src/engine/runner.test.ts`、`server/src/engine/isolation.test.ts` |
+| 讨论运行、暂停/结束、抢答额度、出价格式重试、洞察重试、错误恢复及并行隔离 | `server/src/engine/runner.test.ts`、`server/src/engine/isolation.test.ts` |
 | REST 状态、输入校验、错误响应、删除与密钥边界 | `server/src/routes/api.test.ts` |
 | SSE 首事件、事件补发游标、重连优先级、观众数与实时片段 | `server/src/routes/stream.test.ts` |
 
@@ -72,7 +72,7 @@
 
 - 单元和集成测试均使用本地 mock 提供商；讨论引擎测试配置 `maxTurns = 8`、`pacingMs = 0`、mock 延迟与流间隔为 `0`。特殊暂停测试通过首条正文完成事件触发控制，避免依赖真实时间窗口。
 - Mock 内容依 `discussionId + task + 调用序号` 确定；验证 JSON 任务时仍通过 `parseJsonLoose` 和领域规范化函数，避免绕过真实校验路径。
-- 故障注入使用 `createMockProvider({ failOn })` 或具类型的 provider 包装器：可指定任务持续失败（包括连续出价失败）、首轮前 N 次出价返回不想发言、仅首次洞察触发失败、总结输出非法 JSON，或总结连续失败；首轮无出价场景通过测试内包装 provider 构造，不修改 mock 的公开签名。
+- 故障注入使用 `createMockProvider({ failOn })` 或具类型的 provider 包装器：可指定任务持续失败（包括连续出价失败）、出价返回空白或非 JSON 内容、首轮前 N 次出价返回不想发言、仅首次洞察触发失败、总结输出非法 JSON，或总结连续失败；首轮无出价场景通过测试内包装 provider 构造，不修改 mock 的公开签名。
 - OpenAI 兼容提供商只接受 fake `fetch`：构造成功 JSON、含 `reasoning_content` 的消息、跨 chunk SSE、429 后恢复、连续 5xx 与 abort 超时。测试断言只检验错误行为和密钥不泄漏，不发出真实网络请求。
 - REST/SSE 集成测试使用内存 SQLite 与随机本地 HTTP 端口；事件补发数据优先使用种子记录的结构性性质，不依赖具体种子发言文本或发言条数。
 

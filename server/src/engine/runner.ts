@@ -3,6 +3,7 @@ import type {
   BidIntent,
   Discussion,
   DiscussionStatus,
+  ExpertAct,
   HostAct,
   Insight,
   LiveUtterance,
@@ -27,7 +28,10 @@ import {
 import { mergeInsights } from '../core/insights';
 import { LLMFormatError, parseJsonLoose } from '../core/json';
 import { createRng } from '../core/rng';
-import { selectNextSpeaker as importSelectNextSpeaker } from '../core/scheduler';
+import {
+  getRecentExpertActs,
+  selectNextSpeaker as importSelectNextSpeaker
+} from '../core/scheduler';
 import {
   clampSentences,
   createSentenceLimiter,
@@ -235,6 +239,9 @@ export class DiscussionRunner {
     rebut: 0
   };
   private interruptBidRewriteCount = 0;
+  private bidFormatFailureCount = 0;
+  private bidFormatRetrySuccessCount = 0;
+  private bidFormatRetryStillFailedCount = 0;
 
   constructor(
     database: DatabaseSync,
@@ -532,6 +539,10 @@ export class DiscussionRunner {
       participants: experts,
       lastSpeakerId: this.lastSpeakerId,
       recentExpertSpeakerIds: this.recentExpertSpeakerIds,
+      recentExpertActs: getRecentExpertActs(
+        context.utterances,
+        context.participants
+      ),
       lastSpokeTurn: this.lastSpokeTurn,
       turnIndex: getById(this.database, this.discussionId)?.turnCount ?? 0,
       addressedParticipantId: this.addressed,
@@ -628,15 +639,46 @@ export class DiscussionRunner {
             addressed: this.addressed === participant.id,
             interruptAvailability
           });
-          const response = await this.llm.complete({
+          const request = {
             task: 'bid',
             discussionId: this.discussionId,
             system: prompt.system,
             user: prompt.user,
             context: prompt.context,
             signal: controller.signal
-          });
-          const raw = parseJsonLoose(response.text);
+          } satisfies Parameters<LLMGateway['complete']>[0];
+          const response = await this.llm.complete(request);
+          let raw: unknown;
+          try {
+            raw = parseJsonLoose(response.text);
+          } catch (error) {
+            if (!(error instanceof LLMFormatError)) {
+              throw error;
+            }
+            this.bidFormatFailureCount += 1;
+            this.logFailure('bid', error, {
+              contentLength: response.text.length
+            });
+            if (this.stopped || !this.isLive()) {
+              throw error;
+            }
+
+            const retryResponse = await this.llm.complete(request);
+            try {
+              raw = parseJsonLoose(retryResponse.text);
+              this.bidFormatRetrySuccessCount += 1;
+            } catch (retryError) {
+              if (!(retryError instanceof LLMFormatError)) {
+                throw retryError;
+              }
+              this.bidFormatFailureCount += 1;
+              this.bidFormatRetryStillFailedCount += 1;
+              this.logFailure('bid', retryError, {
+                contentLength: retryResponse.text.length
+              });
+              throw retryError;
+            }
+          }
           const normalized = normalizeBid(raw, {
             selfId: participant.id,
             aliasToParticipantId: aliasMap
@@ -670,7 +712,9 @@ export class DiscussionRunner {
           return { participant, bid: bidWithParticipant };
         } catch (error) {
           if (!this.stopped) {
-            this.logFailure('bid', error);
+            if (!(error instanceof LLMFormatError)) {
+              this.logFailure('bid', error);
+            }
             this.publishParticipantState(
               participant.id,
               'idle',
@@ -1239,7 +1283,11 @@ export class DiscussionRunner {
         discussionId: this.discussionId,
         modelSpeakingBids: this.modelSpeakingBidCounts,
         effectiveSpeakingBids: this.effectiveSpeakingBidCounts,
-        interruptBidRewrites: this.interruptBidRewriteCount
+        interruptBidRewrites: this.interruptBidRewriteCount,
+        bidFormatFailureCount: this.bidFormatFailureCount,
+        bidFormatRetrySuccessCount: this.bidFormatRetrySuccessCount,
+        bidFormatRetryStillFailedCount:
+          this.bidFormatRetryStillFailedCount
       })}`
     );
   }
@@ -1639,9 +1687,15 @@ export class DiscussionRunner {
     this.controllers.delete(controller);
   }
 
-  private logFailure(task: string, error: unknown): void {
+  private logFailure(
+    task: string,
+    error: unknown,
+    metadata?: { contentLength: number }
+  ): void {
+    const contentLength =
+      metadata === undefined ? '' : ` contentLength=${metadata.contentLength}`;
     console.warn(
-      `${task} failed: discussionId=${this.discussionId} category=${errorCategory(error)}`
+      `${task} failed: discussionId=${this.discussionId} category=${errorCategory(error)}${contentLength}`
     );
   }
 }
@@ -1661,6 +1715,7 @@ function selectSpeaker(input: {
   participants: readonly Participant[];
   lastSpeakerId: string | null;
   recentExpertSpeakerIds: readonly string[];
+  recentExpertActs?: readonly ExpertAct[];
   lastSpokeTurn: Readonly<Record<string, number>>;
   turnIndex: number;
   addressedParticipantId: string | null;
@@ -1676,6 +1731,7 @@ function selectSpeaker(input: {
     bids: input.bids,
     lastSpeakerId: input.lastSpeakerId,
     recentExpertSpeakerIds: input.recentExpertSpeakerIds,
+    recentExpertActs: input.recentExpertActs,
     lastSpokeTurn: input.lastSpokeTurn,
     turnIndex: input.turnIndex,
     addressedParticipantId: input.addressedParticipantId,

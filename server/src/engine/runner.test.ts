@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StreamEvent } from '@aps/shared';
 import {
   create as createDiscussion,
@@ -146,6 +146,14 @@ function collectEvents(
   return bus.subscribe(id, (event) => events.push(event));
 }
 
+function readPromptContext(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 function createDeferred() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => {
@@ -159,6 +167,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   database.close();
 });
 
@@ -903,9 +913,245 @@ describe('DiscussionRunner', () => {
       ({ act }) => act !== 'opening' && act !== 'closing'
     );
     expect(getById(database, id)?.status).toBe('paused');
-    expect(bidCalls).toBeGreaterThanOrEqual(expertCount * 3);
+    expect(bidCalls).toBe(expertCount * 3);
     expect(events.some(({ event }) => event.type === 'error')).toBe(true);
     expect(bodyUtterances).toHaveLength(0);
+  });
+
+  it('出价返回无法解析的内容时重试一次并采用重试结果', async () => {
+    vi.stubEnv('APS_REPORT_BID_METRICS', '1');
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const e1Prompts: Array<{
+      system: string;
+      user: string;
+      context: unknown;
+    }> = [];
+    let e1BidCalls = 0;
+    const { runner, id } = makeRunner({
+      maxTurns: 1,
+      rng: () => 0,
+      wrapProvider(provider) {
+        return {
+          name: provider.name,
+          async complete(request) {
+            if (request.task !== 'bid') {
+              return provider.complete(request);
+            }
+            const speakerAlias = readPromptContext(
+              request.context
+            ).speakerAlias;
+            if (speakerAlias === 'E1') {
+              e1BidCalls += 1;
+              e1Prompts.push({
+                system: request.system,
+                user: request.user,
+                context: request.context
+              });
+              return e1BidCalls === 1
+                ? { text: ' \t ' }
+                : {
+                    text: JSON.stringify({
+                      wantToSpeak: true,
+                      intent: 'supplement',
+                      urgency: 0.7,
+                      replyTo: 'H',
+                      focus: '重试出价'
+                    })
+                  };
+            }
+            return { text: '{"wantToSpeak":false}' };
+          },
+          async *stream(request) {
+            yield* provider.stream(request);
+          }
+        };
+      }
+    });
+
+    runner.start();
+    await runner.done;
+
+    const expertOne = listParticipants(database, id).find(
+      ({ role, seat }) => role === 'expert' && seat === 1
+    );
+    const expertOneUtterance = listUtterances(database, id).find(
+      ({ participantId, act }) =>
+        participantId === expertOne?.id && act === 'supplement'
+    );
+    const formatLogs = warnSpy.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.startsWith('bid failed:'));
+    const metricsLine = infoSpy.mock.calls
+      .map(([message]) => message)
+      .find(
+        (message): message is string =>
+          typeof message === 'string' &&
+          message.startsWith('APS_BID_METRICS ')
+      );
+
+    expect(getById(database, id)?.status).toBe('ended');
+    expect(e1BidCalls).toBe(2);
+    expect(e1Prompts[1]).toEqual(e1Prompts[0]);
+    expect(expertOneUtterance).toBeDefined();
+    expect(formatLogs).toHaveLength(1);
+    expect(formatLogs[0]).toContain('contentLength=3');
+    expect(formatLogs[0]).not.toContain(' \t ');
+    expect(metricsLine).toBeDefined();
+    const metrics = JSON.parse(
+      metricsLine?.slice('APS_BID_METRICS '.length) ?? '{}'
+    ) as {
+      bidFormatFailureCount: number;
+      bidFormatRetrySuccessCount: number;
+      bidFormatRetryStillFailedCount: number;
+    };
+    expect(metrics).toMatchObject({
+      bidFormatFailureCount: 1,
+      bidFormatRetrySuccessCount: 1,
+      bidFormatRetryStillFailedCount: 0
+    });
+  });
+
+  it('出价重试后仍无法解析时视为本轮不发言且其余专家正常调度', async () => {
+    vi.stubEnv('APS_REPORT_BID_METRICS', '1');
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const callsByTranscript = new Map<string, number>();
+    let e1BidCalls = 0;
+    const invalidResponse = 'NOT_JSON_PAYLOAD_DO_NOT_LOG';
+    const { runner, id } = makeRunner({
+      maxTurns: 4,
+      rng: () => 0,
+      wrapProvider(provider) {
+        return {
+          name: provider.name,
+          async complete(request) {
+            if (request.task !== 'bid') {
+              return provider.complete(request);
+            }
+            const context = readPromptContext(request.context);
+            const speakerAlias = context.speakerAlias;
+            if (speakerAlias === 'E1') {
+              e1BidCalls += 1;
+              const transcript =
+                typeof context.transcriptWindow === 'string'
+                  ? context.transcriptWindow
+                  : '';
+              callsByTranscript.set(
+                transcript,
+                (callsByTranscript.get(transcript) ?? 0) + 1
+              );
+              return { text: invalidResponse };
+            }
+            return {
+              text: JSON.stringify({
+                wantToSpeak: true,
+                intent: speakerAlias === 'E2' ? 'rebut' : 'supplement',
+                urgency: 0.7,
+                replyTo: null,
+                focus: '继续讨论'
+              })
+            };
+          },
+          async *stream(request) {
+            yield* provider.stream(request);
+          }
+        };
+      }
+    });
+
+    runner.start();
+    await runner.done;
+
+    const participants = listParticipants(database, id);
+    const participantById = new Map(
+      participants.map((participant) => [participant.id, participant])
+    );
+    const expertOne = participants.find(
+      ({ role, seat }) => role === 'expert' && seat === 1
+    );
+    const bodyUtterances = listUtterances(database, id).filter(
+      ({ act }) => act !== 'opening' && act !== 'closing'
+    );
+    const formatLogs = warnSpy.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.startsWith('bid failed:'));
+    const metricsLine = infoSpy.mock.calls
+      .map(([message]) => message)
+      .find(
+        (message): message is string =>
+          typeof message === 'string' &&
+          message.startsWith('APS_BID_METRICS ')
+      );
+
+    expect(getById(database, id)?.status).toBe('ended');
+    expect(e1BidCalls).toBeGreaterThan(0);
+    expect(
+      [...callsByTranscript.values()].every((calls) => calls === 2)
+    ).toBe(true);
+    expect(e1BidCalls).toBe(callsByTranscript.size * 2);
+    expect(
+      bodyUtterances.some(
+        ({ participantId }) =>
+          participantById.get(participantId)?.role === 'expert' &&
+          participantId !== expertOne?.id
+      )
+    ).toBe(true);
+    expect(formatLogs).toHaveLength(e1BidCalls);
+    expect(formatLogs.join('\n')).not.toContain(invalidResponse);
+    expect(metricsLine).toBeDefined();
+    const metrics = JSON.parse(
+      metricsLine?.slice('APS_BID_METRICS '.length) ?? '{}'
+    ) as {
+      bidFormatFailureCount: number;
+      bidFormatRetrySuccessCount: number;
+      bidFormatRetryStillFailedCount: number;
+    };
+    expect(metrics).toMatchObject({
+      bidFormatFailureCount: e1BidCalls,
+      bidFormatRetrySuccessCount: 0,
+      bidFormatRetryStillFailedCount: callsByTranscript.size
+    });
+  });
+
+  it('暂停后不会重试无法解析的专家出价', async () => {
+    let runner: DiscussionRunner | null = null;
+    let e1BidCalls = 0;
+    const setup = makeRunner({
+      maxTurns: 4,
+      wrapProvider(provider) {
+        return {
+          name: provider.name,
+          async complete(request) {
+            if (
+              request.task === 'bid' &&
+              readPromptContext(request.context).speakerAlias === 'E1'
+            ) {
+              e1BidCalls += 1;
+              runner?.pause();
+              return { text: '   ' };
+            }
+            if (request.task === 'bid') {
+              return { text: '{"wantToSpeak":false}' };
+            }
+            return provider.complete(request);
+          },
+          async *stream(request) {
+            yield* provider.stream(request);
+          }
+        };
+      }
+    });
+    runner = setup.runner;
+
+    runner.start();
+    await waitFor(
+      () => getById(database, setup.id)?.status === 'paused',
+      2000
+    );
+    expect(e1BidCalls).toBe(1);
+    runner.stop();
+    await runner.done;
   });
 
   it('开场后首轮无人出价时主持人点名并继续至正常结束', async () => {
