@@ -4,7 +4,11 @@ import {
   createLineupSnapshot,
   createShowcaseSnapshot
 } from '../mocks/fixtures';
-import { initState, reduce } from './discussionReducer';
+import {
+  initState,
+  patchDiscussionState,
+  reduce
+} from './discussionReducer';
 
 const at = '2026-04-15T09:05:00.000Z';
 
@@ -59,6 +63,98 @@ describe('discussion reducer', () => {
     expect(first.lastEventSeq).toBe(1);
     expect(duplicate).toBe(first);
     expect(duplicate.discussion.status).toBe('live');
+  });
+
+  it('advances the summary timestamp and prevents stale control patches', () => {
+    const snapshot = createLineupSnapshot({
+      fixtureNo: 35,
+      status: 'live'
+    });
+    const initialUpdatedAt = Date.parse(snapshot.discussion.updatedAt);
+    const summarizingAt = new Date(initialUpdatedAt + 1_000).toISOString();
+    const summaryAt = new Date(initialUpdatedAt + 2_000).toISOString();
+    const endedAt = new Date(initialUpdatedAt + 3_000).toISOString();
+    const laterButRegressiveAt = new Date(initialUpdatedAt + 4_000).toISOString();
+    const summary = '讨论形成了明确的协作结论。';
+    let state = initState(snapshot);
+
+    state = reduce(
+      state,
+      {
+        type: 'discussion.status',
+        discussionId: snapshot.discussion.id,
+        at: summarizingAt,
+        status: 'summarizing',
+        turnCount: 0,
+        maxTurns: snapshot.discussion.maxTurns
+      },
+      1
+    );
+    expect(state.discussion.updatedAt).toBe(summarizingAt);
+
+    const equalTimeResponse = patchDiscussionState(state, {
+      ...state.discussion,
+      status: 'live',
+      summary: null,
+      updatedAt: summarizingAt
+    });
+    expect(equalTimeResponse).toBe(state);
+
+    const laterButRegressiveResponse = patchDiscussionState(state, {
+      ...state.discussion,
+      status: 'live',
+      summary: null,
+      updatedAt: new Date(initialUpdatedAt + 1_500).toISOString()
+    });
+    expect(laterButRegressiveResponse.discussion.status).toBe('summarizing');
+
+    state = reduce(
+      state,
+      {
+        type: 'summary.completed',
+        discussionId: snapshot.discussion.id,
+        at: summaryAt,
+        summary
+      },
+      2
+    );
+    expect(state.discussion.updatedAt).toBe(summaryAt);
+    const responseBetweenSummaryAndEnded = patchDiscussionState(state, {
+      ...state.discussion,
+      status: 'summarizing',
+      summary: null,
+      updatedAt: summarizingAt
+    });
+    expect(responseBetweenSummaryAndEnded).toBe(state);
+
+    state = reduce(
+      state,
+      {
+        type: 'discussion.status',
+        discussionId: snapshot.discussion.id,
+        at: endedAt,
+        status: 'ended',
+        turnCount: 0,
+        maxTurns: snapshot.discussion.maxTurns
+      },
+      3
+    );
+    const olderResponseAfterEnded = patchDiscussionState(state, {
+      ...state.discussion,
+      status: 'summarizing',
+      summary: null,
+      updatedAt: summarizingAt
+    });
+    expect(olderResponseAfterEnded).toBe(state);
+
+    const newerButRegressiveResponse = patchDiscussionState(state, {
+      ...state.discussion,
+      status: 'summarizing',
+      summary: null,
+      updatedAt: laterButRegressiveAt
+    });
+    expect(newerButRegressiveResponse.discussion.status).toBe('ended');
+    expect(newerButRegressiveResponse.discussion.summary).toBe(summary);
   });
 
   it('streams matching text and appends completed utterances once by seq', () => {

@@ -2,6 +2,7 @@ import {
   isDurableEvent,
   type Discussion,
   type DiscussionSnapshot,
+  type DiscussionStatus,
   type Insight,
   type Participant,
   type StreamEvent
@@ -11,6 +12,16 @@ export interface DiscussionState extends DiscussionSnapshot {
   insightsVersion: number;
   lastError: string | null;
 }
+
+const STATUS_PROGRESS: Record<DiscussionStatus, number> = {
+  draft: 0,
+  lineup_ready: 1,
+  live: 2,
+  paused: 2,
+  summarizing: 3,
+  ended: 4,
+  failed: 4
+};
 
 export function initState(snapshot: DiscussionSnapshot): DiscussionState {
   return {
@@ -64,11 +75,24 @@ export function patchDiscussionState(
   if (
     Number.isFinite(currentUpdatedAt) &&
     Number.isFinite(nextUpdatedAt) &&
-    nextUpdatedAt < currentUpdatedAt
+    nextUpdatedAt <= currentUpdatedAt
   ) {
     return state;
   }
-  return { ...state, discussion: { ...discussion } };
+  const currentStatus = state.discussion.status;
+  const status =
+    currentStatus === 'ended' ||
+    STATUS_PROGRESS[discussion.status] < STATUS_PROGRESS[currentStatus]
+      ? currentStatus
+      : discussion.status;
+  return {
+    ...state,
+    discussion: {
+      ...discussion,
+      status,
+      summary: discussion.summary ?? state.discussion.summary
+    }
+  };
 }
 
 export function reduce(
@@ -183,7 +207,8 @@ export function reduce(
         ...eventMeta,
         discussion: {
           ...state.discussion,
-          summary: event.summary
+          summary: event.summary,
+          updatedAt: event.at
         }
       };
     case 'viewers.updated':

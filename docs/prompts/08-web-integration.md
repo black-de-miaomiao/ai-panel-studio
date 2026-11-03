@@ -97,3 +97,22 @@
    - 在同一个无后端的 dev server 上用 Playwright（Edge）截取大厅 1440×900 `lobby-no-backend-1440.png` 到 C:\Users\123\Desktop\mianshiti\_review\web\，确认显示 NETWORK 提示与重试按钮。截完按 PID 停掉 dev server，确认 5173 端口释放。
 
 完成后运行 `npm run typecheck -w @aps/web`、`npm test -w @aps/web`、`npm run build -w @aps/web`，并重新做 dist 安全检查。约束不变：不改 shared/、server/、docs/；不安装依赖；不读取 server/.env；不提交 git。报告：改动文件、两处修复的说明、实测的代理响应、测试数量与结果、截图路径。
+
+## 续派 2（Prompt 07 交付后，resume 同一子代理；本次只修前端，联调另行续派）
+
+后端引擎（Prompt 07）已经交付，另一个子代理正在 `server/` 下修问题，所以这次不要启动后端，也不要做全栈联调（§1.4 与 §3 之后再续派）。只改 `web/`，只运行 `-w @aps/web` 的命令。
+
+1. 【严重】结束讨论时，已收到的总结可能被清空。时序如下：用户点击“结束并生成总结”→ 服务端转为 summarizing，推送 `discussion.status(summarizing)`（reducer 把 `updatedAt` 设为事件的 `at`）→ mock 或较快的模型很快生成总结，推送 `summary.completed`（reducer 只写 summary，不更新 `updatedAt`）→ 推送 `discussion.status(ended)`。如果 `POST /end` 的 202 响应恰好在 `summary.completed` 和 `discussion.status(ended)` 之间到达，响应里的 `discussion`（status 为 summarizing、summary 为 null、`updatedAt` 等于 summarizing 事件的 `at`）并不早于当前状态，`patchDiscussionState` 会合并它，把已收到的总结清空；之后的 ended 事件不带 summary，总结区一直空着，直到刷新页面。后端约定：控制接口返回的 `updatedAt` 不早于对应 `discussion.status` 事件的 `at`；SSE 事件可能先于 REST 响应到达。
+   - 修改：REST 响应永远不能让状态倒退，也不能清空已经收到的数据。至少做到：`summary.completed` 也推进 `updatedAt`；`patchDiscussionState` 遇到时间戳相等时不覆盖（相等说明 SSE 已经应用了同一次变更）；不用 null 覆盖已有的 summary；status 不从 summarizing 或 ended 退回更早的阶段（状态先后顺序如果 shared 没有合适的常量，就在 web 内定义，不改 shared）。
+   - 回归测试（reducer 单测加一个页面级测试）：end 响应分别在 `summary.completed` 之前、`summary.completed` 与 ended 之间、ended 之后到达，三种顺序下最终都是 ended 且总结可见；start 响应晚于 `discussion.status(live)` 和第一条发言到达时，状态和发言都不倒退。
+
+2. 【测试偶发失败】`pages.integration.test.tsx` 的 “keeps SSE transcript entries when pausing after two new utterances” 在编排者运行根目录 `npm test` 时失败过 1 次：标题出现后立刻读取 `StubEventSource.instances[0]`，而 `useDiscussion` 的 effect 可能还没建立连接，于是拿到 undefined。改成先 `await waitFor(...)` 等实例出现再推送事件；同文件第 223、380 行附近以及其他测试文件里，凡是“刚渲染就读取 instances”的写法一并修正。修完后连续运行 `npm test -w @aps/web` 3 次，全部通过。
+
+3. 【核对】后端将把总结改为流式推送。summarizing 期间会先收到 act 为 `closing` 的 `utterance.started` 和多条 delta；如果某次生成失败重试，会再收到一条新的 `utterance.started`（新的 utteranceId）；最后是 `utterance.completed` 和 `summary.completed`。用事件序列测试确认演播厅在这段时间表现合理：实时字幕逐步显示总结正文；收到新的 started 时旧字幕被替换；完成后实时字幕不残留，Transcript 的 closing 条目与总结区内容一致。不符合的地方做调整并补测试。
+
+完成后运行 `npm run typecheck -w @aps/web`、`npm test -w @aps/web`（连续 3 次）、`npm run build -w @aps/web`，并按续派 1 的方法重新做 dist 安全检查。约束不变：不改 shared/、server/、docs/；不安装依赖；不读取 server/.env；不提交 git；不启动后端。报告：改动文件、各项修复的说明、新增测试与结果、3 次测试运行的结果、dist 检查结果。
+
+## 派发说明补充（编排者，Prompt 07 交付后）
+
+- §1.4 由编排者直接验证，不再续派：后端只监听 `127.0.0.1:8787`，Vite 默认代理目标是 `http://localhost:8787`；本机 `localhost` 依次解析为 `::1` 与 `127.0.0.1`，代理会回退到 IPv4。经 5173 访问 `/api/health` 与 `/api/discussions` 都返回 200 JSON；SSE 经开发代理逐条到达（25 秒内 14 个 delta 落在 14 个不同的 50 ms 时间段），没有被缓冲。默认值无需修改。检查脚本：`C:\Users\123\Desktop\mianshiti\_review\live\proxy-sse-check.mjs`。
+- §3 全栈联调与 Prompt 09 重叠：09 用真实浏览器走完“浏览器 → Vite → Express → 引擎 → SQLite → SSE”整条链路并截图，还包含 1 次真实模型场景。因此 §3 并入 Prompt 09 执行，不再单独续派，也省下 1 次 DeepSeek 调用。

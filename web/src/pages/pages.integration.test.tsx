@@ -9,7 +9,11 @@ import {
   it,
   vi
 } from 'vitest';
-import type { Discussion, DiscussionSnapshot } from '@aps/shared';
+import type {
+  Discussion,
+  DiscussionSnapshot,
+  StreamEvent
+} from '@aps/shared';
 import App from '../App';
 import { ApiError } from '../api/httpApi';
 import { DiscussionApiProvider } from '../api/DiscussionApiContext';
@@ -45,6 +49,7 @@ class StubEventSource {
 
 function makeApi(overrides: Partial<DiscussionApi> = {}): DiscussionApi {
   const snapshot = createLineupSnapshot({ fixtureNo: 201 });
+  const updatedAt = Date.parse(snapshot.discussion.updatedAt);
   return {
     getHealth: vi.fn(async () => ({
       ok: true,
@@ -60,23 +65,46 @@ function makeApi(overrides: Partial<DiscussionApi> = {}): DiscussionApi {
     regenerateLineup: vi.fn(async () => snapshot),
     start: vi.fn(async () => ({
       ...snapshot.discussion,
-      status: 'live' as const
+      status: 'live' as const,
+      updatedAt: new Date(updatedAt + 1_000).toISOString()
     })),
     pause: vi.fn(async () => ({
       ...snapshot.discussion,
-      status: 'paused' as const
+      status: 'paused' as const,
+      updatedAt: new Date(updatedAt + 2_000).toISOString()
     })),
     resume: vi.fn(async () => ({
       ...snapshot.discussion,
-      status: 'live' as const
+      status: 'live' as const,
+      updatedAt: new Date(updatedAt + 3_000).toISOString()
     })),
     end: vi.fn(async () => ({
       ...snapshot.discussion,
-      status: 'summarizing' as const
+      status: 'summarizing' as const,
+      updatedAt: new Date(updatedAt + 4_000).toISOString()
     })),
     deleteDiscussion: vi.fn(async () => {}),
     ...overrides
   };
+}
+
+async function waitForStubEventSource(
+  index = 0
+): Promise<StubEventSource> {
+  await waitFor(() => {
+    expect(StubEventSource.instances[index]?.onmessage).toBeTypeOf('function');
+  });
+  const source = StubEventSource.instances[index];
+  if (!source) throw new Error('SSE EventSource was not created.');
+  return source;
+}
+
+function emitEvent(
+  source: StubEventSource,
+  event: StreamEvent,
+  lastEventId = ''
+): void {
+  act(() => source.emit(JSON.stringify(event), lastEventId));
 }
 
 function renderAt(path: string, api: DiscussionApi) {
@@ -220,7 +248,8 @@ describe('pages with an injected discussion API', () => {
     expect(
       await screen.findByRole('heading', { name: snapshot.discussion.topic })
     ).toBeInTheDocument();
-    expect(StubEventSource.instances[0]?.url).toContain(
+    const source = await waitForStubEventSource();
+    expect(source.url).toContain(
       `since=${snapshot.lastEventSeq}`
     );
   });
@@ -228,21 +257,26 @@ describe('pages with an injected discussion API', () => {
   it('calls start, pause, resume, and end APIs from studio controls', async () => {
     const user = userEvent.setup();
     const snapshot = createLineupSnapshot({ fixtureNo: 205 });
+    const updatedAt = Date.parse(snapshot.discussion.updatedAt);
     const start = vi.fn(async () => ({
       ...snapshot.discussion,
-      status: 'live' as const
+      status: 'live' as const,
+      updatedAt: new Date(updatedAt + 1_000).toISOString()
     }));
     const pause = vi.fn(async () => ({
       ...snapshot.discussion,
-      status: 'paused' as const
+      status: 'paused' as const,
+      updatedAt: new Date(updatedAt + 2_000).toISOString()
     }));
     const resume = vi.fn(async () => ({
       ...snapshot.discussion,
-      status: 'live' as const
+      status: 'live' as const,
+      updatedAt: new Date(updatedAt + 3_000).toISOString()
     }));
     const end = vi.fn(async () => ({
       ...snapshot.discussion,
-      status: 'summarizing' as const
+      status: 'summarizing' as const,
+      updatedAt: new Date(updatedAt + 4_000).toISOString()
     }));
     const api = makeApi({
       getDiscussion: vi.fn(async () => snapshot),
@@ -299,9 +333,7 @@ describe('pages with an injected discussion API', () => {
     renderAt(`/studio/${snapshot.discussion.id}`, api);
     await screen.findByRole('heading', { name: snapshot.discussion.topic });
 
-    const source = StubEventSource.instances[0];
-    expect(source).toBeDefined();
-    if (!source) return;
+    const source = await waitForStubEventSource();
 
     const utterances = [
       {
@@ -326,18 +358,17 @@ describe('pages with an injected discussion API', () => {
       }
     ] as const;
 
-    act(() => {
-      utterances.forEach((utterance, index) => {
-        source.emit(
-          JSON.stringify({
-            type: 'utterance.completed',
-            discussionId: snapshot.discussion.id,
-            at: sseAt,
-            utterance
-          }),
-          String(index + 1)
-        );
-      });
+    utterances.forEach((utterance, index) => {
+      emitEvent(
+        source,
+        {
+          type: 'utterance.completed',
+          discussionId: snapshot.discussion.id,
+          at: sseAt,
+          utterance
+        },
+        String(snapshot.lastEventSeq + index + 1)
+      );
     });
     expect(await screen.findAllByText(utterances[0].content)).toHaveLength(2);
     expect(await screen.findAllByText(utterances[1].content)).toHaveLength(2);
@@ -357,12 +388,27 @@ describe('pages with an injected discussion API', () => {
     expect(screen.getAllByText('已暂停').length).toBeGreaterThan(0);
   });
 
-  it('does not apply an older control response over a newer SSE status', async () => {
+  it('keeps the live status and first utterance when a start response arrives late', async () => {
     const user = userEvent.setup();
     const snapshot = createLineupSnapshot({ fixtureNo: 208 });
+    const host = snapshot.participants[0];
+    expect(host).toBeDefined();
+    if (!host) return;
+
     const initialUpdatedAt = Date.parse(snapshot.discussion.updatedAt);
     const responseUpdatedAt = new Date(initialUpdatedAt + 1_000).toISOString();
     const sseUpdatedAt = new Date(initialUpdatedAt + 2_000).toISOString();
+    const utteranceAt = new Date(initialUpdatedAt + 3_000).toISOString();
+    const utterance = {
+      id: '50000000-0000-4000-8000-000000000208',
+      discussionId: snapshot.discussion.id,
+      participantId: host.id,
+      seq: 1,
+      act: 'opening' as const,
+      replyToParticipantId: null,
+      content: '直播开始后到达的第一条发言。',
+      createdAt: utteranceAt
+    };
     let resolveStart: ((discussion: Discussion) => void) | undefined;
     const start = vi.fn(
       () =>
@@ -377,24 +423,33 @@ describe('pages with an injected discussion API', () => {
     renderAt(`/studio/${snapshot.discussion.id}`, api);
 
     await user.click(await screen.findByRole('button', { name: '开始直播' }));
-    const source = StubEventSource.instances[0];
-    expect(source).toBeDefined();
+    const source = await waitForStubEventSource();
     expect(resolveStart).toBeDefined();
-    if (!source || !resolveStart) return;
+    if (!resolveStart) return;
 
-    act(() => {
-      source.emit(
-        JSON.stringify({
-          type: 'discussion.status',
-          discussionId: snapshot.discussion.id,
-          at: sseUpdatedAt,
-          status: 'live',
-          turnCount: 0,
-          maxTurns: snapshot.discussion.maxTurns
-        }),
-        '1'
-      );
-    });
+    emitEvent(
+      source,
+      {
+        type: 'discussion.status',
+        discussionId: snapshot.discussion.id,
+        at: sseUpdatedAt,
+        status: 'live',
+        turnCount: 0,
+        maxTurns: snapshot.discussion.maxTurns
+      },
+      String(snapshot.lastEventSeq + 1)
+    );
+    emitEvent(
+      source,
+      {
+        type: 'utterance.completed',
+        discussionId: snapshot.discussion.id,
+        at: utteranceAt,
+        utterance
+      },
+      String(snapshot.lastEventSeq + 2)
+    );
+    expect(await screen.findAllByText(utterance.content)).toHaveLength(2);
     const pauseButton = await screen.findByRole('button', { name: '暂停' });
 
     await act(async () => {
@@ -406,9 +461,294 @@ describe('pages with an injected discussion API', () => {
     });
 
     await waitFor(() => expect(pauseButton).toBeEnabled());
+    expect(
+      document.querySelector('.studio-layout')
+    ).toHaveAttribute('data-studio-status', 'live');
     expect(screen.getByText('LIVE')).toBeInTheDocument();
+    expect(await screen.findAllByText(utterance.content)).toHaveLength(2);
     expect(start).toHaveBeenCalledWith(snapshot.discussion.id);
     expect(screen.queryByRole('button', { name: '开始直播' })).toBeNull();
+  });
+
+  it.each([
+    'before summary',
+    'between summary and ended',
+    'after ended'
+  ] as const)(
+    'retains the completed summary when the end response arrives %s',
+    async (responseTiming) => {
+      const user = userEvent.setup();
+      const snapshot = createLineupSnapshot({
+        fixtureNo: 209,
+        status: 'live'
+      });
+      const initialUpdatedAt = Date.parse(snapshot.discussion.updatedAt);
+      const summarizingAt = new Date(initialUpdatedAt + 1_000).toISOString();
+      const summaryAt = new Date(initialUpdatedAt + 2_000).toISOString();
+      const endedAt = new Date(initialUpdatedAt + 3_000).toISOString();
+      const summary = '讨论形成了明确的协作结论。';
+      let resolveEnd: ((discussion: Discussion) => void) | undefined;
+      const end = vi.fn(
+        () =>
+          new Promise<Discussion>((resolve) => {
+            resolveEnd = resolve;
+          })
+      );
+      const api = makeApi({
+        getDiscussion: vi.fn(async () => snapshot),
+        end
+      });
+      renderAt(`/studio/${snapshot.discussion.id}`, api);
+      await screen.findByRole('heading', { name: snapshot.discussion.topic });
+      const source = await waitForStubEventSource();
+
+      await user.click(await screen.findByRole('button', { name: '结束讨论' }));
+      await user.click(
+        await screen.findByRole('button', { name: '结束并生成总结' })
+      );
+      await waitFor(() => expect(end).toHaveBeenCalledWith(snapshot.discussion.id));
+      if (!resolveEnd) throw new Error('End response resolver was not created.');
+
+      emitEvent(
+        source,
+        {
+          type: 'discussion.status',
+          discussionId: snapshot.discussion.id,
+          at: summarizingAt,
+          status: 'summarizing',
+          turnCount: snapshot.discussion.turnCount,
+          maxTurns: snapshot.discussion.maxTurns
+        },
+        String(snapshot.lastEventSeq + 1)
+      );
+      await waitFor(() =>
+        expect(document.querySelector('.studio-layout')).toHaveAttribute(
+          'data-studio-status',
+          'summarizing'
+        )
+      );
+
+      const endResponse: Discussion = {
+        ...snapshot.discussion,
+        status: 'summarizing',
+        summary: null,
+        updatedAt: summarizingAt
+      };
+      const respondToEnd = async () => {
+        const resolve = resolveEnd;
+        if (!resolve) throw new Error('End response resolver was not created.');
+        await act(async () => resolve(endResponse));
+      };
+      const emitSummary = () =>
+        emitEvent(
+          source,
+          {
+            type: 'summary.completed',
+            discussionId: snapshot.discussion.id,
+            at: summaryAt,
+            summary
+          },
+          String(snapshot.lastEventSeq + 2)
+        );
+      const emitEnded = () =>
+        emitEvent(
+          source,
+          {
+            type: 'discussion.status',
+            discussionId: snapshot.discussion.id,
+            at: endedAt,
+            status: 'ended',
+            turnCount: snapshot.discussion.turnCount,
+            maxTurns: snapshot.discussion.maxTurns
+          },
+          String(snapshot.lastEventSeq + 3)
+        );
+
+      if (responseTiming === 'before summary') await respondToEnd();
+      emitSummary();
+      if (responseTiming === 'between summary and ended') {
+        await respondToEnd();
+      }
+      emitEnded();
+      if (responseTiming === 'after ended') await respondToEnd();
+
+      await waitFor(() =>
+        expect(document.querySelector('.studio-layout')).toHaveAttribute(
+          'data-studio-status',
+          'ended'
+        )
+      );
+      expect(await screen.findByText(summary)).toBeInTheDocument();
+      expect(end).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it('streams closing text, replaces a retried caption, and finalizes matching content', async () => {
+    const snapshot = createLineupSnapshot({
+      fixtureNo: 210,
+      status: 'live'
+    });
+    const host = snapshot.participants[0];
+    expect(host).toBeDefined();
+    if (!host) return;
+
+    const initialUpdatedAt = Date.parse(snapshot.discussion.updatedAt);
+    const summarizingAt = new Date(initialUpdatedAt + 1_000).toISOString();
+    const firstStartedAt = new Date(initialUpdatedAt + 2_000).toISOString();
+    const retryStartedAt = new Date(initialUpdatedAt + 3_000).toISOString();
+    const completedAt = new Date(initialUpdatedAt + 4_000).toISOString();
+    const summaryAt = new Date(initialUpdatedAt + 5_000).toISOString();
+    const endedAt = new Date(initialUpdatedAt + 6_000).toISOString();
+    const firstUtteranceId = '50000000-0000-4000-8000-000000000210';
+    const closingUtteranceId = '50000000-0000-4000-8000-000000000211';
+    const firstAttemptText = '先整理本场共识，';
+    const secondAttemptText = '讨论形成了明确共识。';
+    const finalAttemptText = '下一步从低风险试点开始。';
+    const summary = `${secondAttemptText}${finalAttemptText}`;
+    const api = makeApi({
+      getDiscussion: vi.fn(async () => snapshot)
+    });
+    renderAt(`/studio/${snapshot.discussion.id}`, api);
+    await screen.findByRole('heading', { name: snapshot.discussion.topic });
+    const source = await waitForStubEventSource();
+    const seq = snapshot.lastEventSeq;
+
+    emitEvent(
+      source,
+      {
+        type: 'discussion.status',
+        discussionId: snapshot.discussion.id,
+        at: summarizingAt,
+        status: 'summarizing',
+        turnCount: snapshot.discussion.turnCount,
+        maxTurns: snapshot.discussion.maxTurns
+      },
+      String(seq + 1)
+    );
+    const captionText = () =>
+      document.querySelector<HTMLElement>('.on-air-caption__text')!;
+    const summaryStream = () =>
+      document.querySelector<HTMLElement>('.summary-panel__stream')!;
+    await waitFor(() => expect(summaryStream()).toBeInTheDocument());
+
+    emitEvent(source, {
+      type: 'utterance.started',
+      discussionId: snapshot.discussion.id,
+      at: firstStartedAt,
+      utteranceId: firstUtteranceId,
+      participantId: host.id,
+      act: 'closing',
+      replyToParticipantId: null,
+      seq: 1
+    });
+    emitEvent(source, {
+      type: 'utterance.delta',
+      discussionId: snapshot.discussion.id,
+      at: firstStartedAt,
+      utteranceId: firstUtteranceId,
+      delta: firstAttemptText
+    });
+    await waitFor(() =>
+      expect(captionText()).toHaveTextContent(firstAttemptText)
+    );
+    expect(summaryStream()).toHaveTextContent(firstAttemptText);
+
+    emitEvent(source, {
+      type: 'utterance.started',
+      discussionId: snapshot.discussion.id,
+      at: retryStartedAt,
+      utteranceId: closingUtteranceId,
+      participantId: host.id,
+      act: 'closing',
+      replyToParticipantId: null,
+      seq: 2
+    });
+    await waitFor(() =>
+      expect(captionText()).toHaveTextContent('等待下一位发言…')
+    );
+    expect(captionText()).not.toHaveTextContent(firstAttemptText);
+
+    emitEvent(source, {
+      type: 'utterance.delta',
+      discussionId: snapshot.discussion.id,
+      at: retryStartedAt,
+      utteranceId: closingUtteranceId,
+      delta: secondAttemptText
+    });
+    emitEvent(source, {
+      type: 'utterance.delta',
+      discussionId: snapshot.discussion.id,
+      at: retryStartedAt,
+      utteranceId: closingUtteranceId,
+      delta: finalAttemptText
+    });
+    await waitFor(() => expect(captionText()).toHaveTextContent(summary));
+    expect(summaryStream()).toHaveTextContent(summary);
+
+    emitEvent(
+      source,
+      {
+        type: 'utterance.completed',
+        discussionId: snapshot.discussion.id,
+        at: completedAt,
+        utterance: {
+          id: closingUtteranceId,
+          discussionId: snapshot.discussion.id,
+          participantId: host.id,
+          seq: 2,
+          act: 'closing',
+          replyToParticipantId: null,
+          content: summary,
+          createdAt: completedAt
+        }
+      },
+      String(seq + 2)
+    );
+    await waitFor(() =>
+      expect(captionText()).toHaveTextContent('等待下一位发言…')
+    );
+    expect(captionText()).not.toHaveTextContent(summary);
+    expect(
+      document.querySelectorAll('.transcript-item[data-seq="2"] p')
+    ).toHaveLength(2);
+
+    emitEvent(
+      source,
+      {
+        type: 'summary.completed',
+        discussionId: snapshot.discussion.id,
+        at: summaryAt,
+        summary
+      },
+      String(seq + 3)
+    );
+    emitEvent(
+      source,
+      {
+        type: 'discussion.status',
+        discussionId: snapshot.discussion.id,
+        at: endedAt,
+        status: 'ended',
+        turnCount: snapshot.discussion.turnCount,
+        maxTurns: snapshot.discussion.maxTurns
+      },
+      String(seq + 4)
+    );
+
+    await waitFor(() =>
+      expect(captionText()).toHaveTextContent('讨论已结束')
+    );
+    expect(captionText()).not.toHaveTextContent(summary);
+    const closingItems = document.querySelectorAll(
+      '.transcript-item[data-seq="2"] p'
+    );
+    expect(closingItems).toHaveLength(2);
+    for (const item of closingItems) {
+      expect(item).toHaveTextContent(summary);
+    }
+    expect(
+      document.querySelector('.summary-panel__paragraphs')
+    ).toHaveTextContent(summary);
   });
 
   it('refreshes the studio snapshot and announces a 409 state conflict', async () => {
