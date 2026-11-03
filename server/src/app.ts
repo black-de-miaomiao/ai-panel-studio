@@ -1,10 +1,18 @@
 import express, { type ErrorRequestHandler } from 'express';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AppConfig } from './config';
+import type { DiscussionEventBus } from './engine/eventBus';
+import type { DiscussionManager } from './engine/manager';
+import type { LLMGateway } from './llm/gateway';
+import { createDiscussionsRouter } from './routes/discussions';
+import { createStreamRouter } from './routes/stream';
 
 export function createApp(deps: {
   config: AppConfig;
   db: DatabaseSync;
+  llm: LLMGateway;
+  bus: DiscussionEventBus;
+  manager: DiscussionManager;
 }): express.Express {
   const { config } = deps;
   const app = express();
@@ -20,6 +28,20 @@ export function createApp(deps: {
         fastModel: config.llm.fastModel
       }
     });
+  });
+
+  app.use('/api/discussions', (request, response, next) => {
+    const routeDeps = {
+      config,
+      db: deps.db,
+      llm: deps.llm,
+      bus: deps.bus,
+      manager: deps.manager
+    };
+    const router = request.path.endsWith('/stream')
+      ? createStreamRouter({ db: deps.db, bus: deps.bus })
+      : createDiscussionsRouter(routeDeps);
+    return router(request, response, next);
   });
 
   const errorHandler: ErrorRequestHandler = (
