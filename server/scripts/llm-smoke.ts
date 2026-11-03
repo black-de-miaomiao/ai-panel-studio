@@ -10,6 +10,10 @@ import {
   type HostPolicyParticipant
 } from '../src/core/hostPolicy';
 import { normalizeBid } from '../src/core/bid';
+import {
+  enforceInterruptAvailability,
+  resolveInterruptAvailability
+} from '../src/core/interruptPolicy';
 import { mergeInsights } from '../src/core/insights';
 import { normalizeLineup } from '../src/core/lineup';
 import { parseJsonLoose } from '../src/core/json';
@@ -43,6 +47,7 @@ import type { LLMTask } from '../src/llm/types';
 
 const TOPIC = 'AI 编程助手会让初级程序员岗位消失吗？';
 const EXPERT_COUNT = 4;
+const SMOKE_MAX_TURNS = 6;
 const UNSAFE_PUBLIC_TEXT =
   /\bsk-[a-z0-9_-]{8,}\b|authorization\s*:|reasoning_content/iu;
 
@@ -528,12 +533,29 @@ async function requestBid(
 ): Promise<BidResult> {
   const speakerAlias =
     state.aliasByParticipantId.get(participant.id) ?? 'E1';
+  const bodyUtterances = state.utterances.filter(
+    ({ act }) => act !== 'opening' && act !== 'closing'
+  );
+  const expertIds = new Set(
+    state.participants
+      .filter(({ role }) => role === 'expert')
+      .map(({ id }) => id)
+  );
+  const interruptAvailability = resolveInterruptAvailability({
+    maxTurns: SMOKE_MAX_TURNS,
+    usedCount: bodyUtterances.filter(
+      ({ act, participantId }) =>
+        act === 'interrupt' && expertIds.has(participantId)
+    ).length,
+    lastBodyAct: bodyUtterances.at(-1)?.act ?? null
+  });
   const prompt = buildBidPrompt({
     ...discussionPromptInput(state),
     speakerAlias,
     speaker: roleCard(participant),
     previousUtterance: previousUtteranceForPrompt(state),
-    addressed: state.addressedParticipantId === participant.id
+    addressed: state.addressedParticipantId === participant.id,
+    interruptAvailability
   });
   let responseText: string;
   try {
@@ -575,12 +597,13 @@ async function requestBid(
   }
 
   try {
+    const normalized = normalizeBid(parsed, {
+      selfId: participant.id,
+      aliasToParticipantId: state.aliases
+    });
     return {
       participant,
-      bid: normalizeBid(parsed, {
-        selfId: participant.id,
-        aliasToParticipantId: state.aliases
-      }),
+      bid: enforceInterruptAvailability(normalized, interruptAvailability),
       failed: false,
       failureCategory: null
     };

@@ -419,6 +419,60 @@ describe('讨论 REST API', () => {
     expect(regenerated?.body.snapshot.discussion.status).toBe('lineup_ready');
   });
 
+  it('待开播讨论换一批失败时保留原阵容与状态且仍可开播', async () => {
+    const created = await request(app)
+      .post('/api/discussions')
+      .send({ topic: '换一批失败仍可开播', expertCount: 2 });
+    const discussionId = created.body.snapshot.discussion.id as string;
+    const before = await request(app).get(`/api/discussions/${discussionId}`);
+    const originalParticipantIds = before.body.snapshot.participants.map(
+      (participant: { id: string }) => participant.id
+    );
+    const beforeDiscussion = before.body.snapshot.discussion;
+    const beforeEventSeq = before.body.snapshot.lastEventSeq;
+
+    app = createTestApp({ failOnLineup: true });
+    const failed = await request(app).post(
+      `/api/discussions/${discussionId}/lineup/regenerate`
+    );
+    const afterFailure = await request(app).get(
+      `/api/discussions/${discussionId}`
+    );
+
+    expect(created.status).toBe(201);
+    expect(before.status).toBe(200);
+    expect(failed.status).toBe(502);
+    expect(failed.body.error.code).toBe('LLM_ERROR');
+    expect(failed.body.error.message).toBe(
+      '换一批失败，已保留当前阵容，可以重试或直接确认开播'
+    );
+    expect(failed.body.error.details?.[0]?.discussionId).toBe(discussionId);
+    expect(afterFailure.body.snapshot.discussion.status).toBe('lineup_ready');
+    expect(afterFailure.body.snapshot.discussion.errorMessage).toBeNull();
+    expect(afterFailure.body.snapshot.discussion.updatedAt).toBe(
+      beforeDiscussion.updatedAt
+    );
+    expect(afterFailure.body.snapshot.lastEventSeq).toBe(beforeEventSeq);
+    expect(
+      afterFailure.body.snapshot.participants.map(
+        (participant: { id: string }) => participant.id
+      )
+    ).toEqual(originalParticipantIds);
+
+    const started = await request(app).post(
+      `/api/discussions/${discussionId}/start`
+    );
+    const afterStart = await request(app).get(
+      `/api/discussions/${discussionId}`
+    );
+
+    expect(started.status).toBe(200);
+    expect(started.body.discussion.status).toBe('live');
+    expect(afterStart.body.snapshot.participants.map(
+      (participant: { id: string }) => participant.id
+    )).toEqual(originalParticipantIds);
+  });
+
   it('阵容更新期间拒绝开播和重复更换，完成后开播保留新阵容', async () => {
     const created = await request(app)
       .post('/api/discussions')
@@ -520,7 +574,7 @@ describe('讨论 REST API', () => {
     expect(listParticipants(database, draft.id)).toEqual([]);
   });
 
-  it('重新生成失败后释放互斥并允许再次尝试', async () => {
+  it('待开播讨论换一批失败后释放互斥并允许再次尝试', async () => {
     const created = await request(app)
       .post('/api/discussions')
       .send({ topic: '失败后释放阵容锁', expertCount: 2 });
@@ -532,7 +586,7 @@ describe('讨论 REST API', () => {
       `/api/discussions/${discussionId}/lineup/regenerate`
     );
     expect(failed.status).toBe(502);
-    expect(getById(database, discussionId)?.status).toBe('failed');
+    expect(getById(database, discussionId)?.status).toBe('lineup_ready');
 
     toggle.setShouldFail(false);
     const retried = await request(app).post(

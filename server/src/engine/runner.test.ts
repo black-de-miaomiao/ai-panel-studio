@@ -16,6 +16,7 @@ import {
   replaceLineup
 } from '../db/repositories/participants';
 import { listByDiscussion as listUtterances } from '../db/repositories/utterances';
+import { createRng } from '../core/rng';
 import { createTestDb, waitFor } from '../test/helpers';
 import { createEventBus } from './eventBus';
 import { DiscussionRunner } from './runner';
@@ -60,6 +61,7 @@ function makeRunner(options: {
   failFirstInsight?: boolean;
   invalidSummary?: boolean;
   failSummary?: boolean;
+  rng?: () => number;
   wrapProvider?: (provider: LLMProvider) => LLMProvider;
 }) {
   const discussion = createDiscussion(database, {
@@ -123,7 +125,8 @@ function makeRunner(options: {
     bus,
     gateway,
     { maxTurns: options.maxTurns ?? 8, pacingMs: 0 },
-    id
+    id,
+    options.rng
   );
   return {
     runner,
@@ -227,6 +230,88 @@ describe('DiscussionRunner', () => {
     expect(body[0]?.act).toBe('statement');
   });
 
+  it('抢答额度用完后改为 rebut 且小窗意图一致', async () => {
+    const { runner, bus, id } = makeRunner({
+      maxTurns: 2,
+      wrapProvider: (provider) => ({
+        ...provider,
+        async complete(request) {
+          if (request.task === 'bid') {
+            const context = request.context as {
+              speakerAlias: string;
+              interruptAvailability: {
+                usedCount: number;
+                limit: number;
+                allowed: boolean;
+              };
+            };
+            const targetAlias =
+              context.interruptAvailability.usedCount === 0 ? 'E1' : 'E2';
+            return {
+              text: JSON.stringify({
+                wantToSpeak: context.speakerAlias === targetAlias,
+                intent: 'interrupt',
+                urgency: 0.95,
+                replyTo: 'H',
+                focus: '直接否定核心立场'
+              })
+            };
+          }
+          return provider.complete(request);
+        }
+      })
+    });
+    const events: Array<{ event: StreamEvent; seq: number | null }> = [];
+    const unsubscribe = collectEvents(bus, id, events);
+    runner.start();
+    await runner.done;
+    unsubscribe();
+
+    const participants = new Map(
+      listParticipants(database, id).map((participant) => [
+        participant.id,
+        participant
+      ])
+    );
+    const bodies = listUtterances(database, id).filter(
+      ({ act }) => act !== 'opening' && act !== 'closing'
+    );
+    const expertBodies = bodies.filter(
+      ({ participantId }) =>
+        participants.get(participantId)?.role === 'expert'
+    );
+    const secondExpert = listParticipants(database, id).find(
+      ({ seat }) => seat === 2
+    );
+    const secondExpertIntentIndex = events.findIndex(
+      ({ event }) =>
+        event.type === 'participant.state' &&
+        event.participantId === secondExpert?.id &&
+        event.agentState === 'preparing' &&
+        event.agentIntent === 'rebut'
+    );
+    const secondExpertSpeechIndex = events.findIndex(
+      ({ event }) =>
+        event.type === 'utterance.started' &&
+        event.participantId === secondExpert?.id &&
+        event.act === 'rebut'
+    );
+
+    expect(expertBodies.map(({ act }) => act)).toEqual([
+      'interrupt',
+      'rebut'
+    ]);
+    expect(
+      bodies.some(
+        (utterance, index) =>
+          utterance.act === 'interrupt' &&
+          bodies[index - 1]?.act === 'interrupt'
+      )
+    ).toBe(false);
+    expect(secondExpertIntentIndex).toBeGreaterThanOrEqual(0);
+    expect(secondExpertSpeechIndex).toBeGreaterThan(secondExpertIntentIndex);
+  });
+
   it('每条正文发言后持久化递增轮次且更新时间与状态事件一致', async () => {
     const { runner, bus, id } = makeRunner({ maxTurns: 4 });
     const events: Array<{ event: StreamEvent; seq: number | null }> = [];
@@ -324,7 +409,28 @@ describe('DiscussionRunner', () => {
   });
 
   it('总结完成前至少推送一次洞察更新且结束时存在洞察', async () => {
-    const { runner, bus, id } = makeRunner({ maxTurns: 8 });
+    const { runner, bus, id } = makeRunner({
+      maxTurns: 8,
+      rng: createRng('insight-update-test'),
+      wrapProvider: (provider) => {
+        const stableMockDiscussionId = 'insight-update-test';
+        const withStableMockId = (
+          request: Parameters<LLMProvider['complete']>[0]
+        ) => ({
+          ...request,
+          discussionId: stableMockDiscussionId
+        });
+        return {
+          ...provider,
+          async complete(request) {
+            return provider.complete(withStableMockId(request));
+          },
+          async *stream(request) {
+            yield* provider.stream(withStableMockId(request));
+          }
+        };
+      }
+    });
     const events: Array<{ event: StreamEvent; seq: number | null }> = [];
     const unsubscribe = collectEvents(bus, id, events);
     runner.start();
@@ -634,7 +740,28 @@ describe('DiscussionRunner', () => {
   });
 
   it('专家正文发言至少覆盖两种发言行为', async () => {
-    const { runner, id } = makeRunner({ maxTurns: 8 });
+    const { runner, id } = makeRunner({
+      maxTurns: 8,
+      rng: createRng('act-coverage-test'),
+      wrapProvider: (provider) => {
+        const stableMockDiscussionId = 'act-coverage-test';
+        const withStableMockId = (
+          request: Parameters<LLMProvider['complete']>[0]
+        ) => ({
+          ...request,
+          discussionId: stableMockDiscussionId
+        });
+        return {
+          ...provider,
+          async complete(request) {
+            return provider.complete(withStableMockId(request));
+          },
+          async *stream(request) {
+            yield* provider.stream(withStableMockId(request));
+          }
+        };
+      }
+    });
     runner.start();
     await runner.done;
     const participantById = new Map(

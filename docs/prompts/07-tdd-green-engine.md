@@ -131,3 +131,42 @@
 4. 结束前按 PID 停掉所有服务进程，确认端口已释放。
 
 约束不变：不读取、打印或修改 `server/.env`；不安装依赖；不改 `shared/`、`web/`、`docs/prompts/`；不提交 git。报告：改动文件、每项修复的做法与对应测试、修正过的测试断言及依据、mock 联调结果、DeepSeek 第 4 次运行的数据与观察、遗留问题。
+
+---
+
+## 续派 2（编排者审阅续派 1 并提交 d6aabc4 后，resume 同一子代理）
+
+续派 1 的 5 项修复已审查通过并提交（d6aabc4）。编排者复跑了根目录 typecheck 与 `npm test`（shared 11、server 185、web 55 全绿），用你的脚本重跑 mock 全流程（含新增 3 项检查）全部通过，也通读了 run-4：总结流式、最后一条正文来自专家、讨论质量都达到预期。还剩下面两个问题。规格已由编排者先行修订；本次除 `docs/RUNTIME-PROMPTS.md` 外不改 `docs/` 下的文件，发现规格仍有矛盾时在报告中指出。
+
+### 1. 【体验】“换一批”失败会毁掉一套可用的阵容
+
+现状：讨论处于 `lineup_ready` 时调用 regenerate，模型最终失败后讨论变为 `failed` 并写入 error_message。前端 `regenerate()` 失败时保留旧阵容，“确认阵容，进入演播厅”只看本地快照的 `lineup_ready`，仍然可以点；用户一点就收到 409，“重试进入演播厅”也会一直 409，只有再换一批成功才能继续。规格本身也矛盾：API.md §5 状态表和 ARCHITECTURE §4 状态图都没有 `lineup_ready → failed`。
+
+已修订的规格：API.md §3.5 末段与 §3.6 的“可能错误”、PRD F2 交互要点与新增的 AC-F2-7、TEST-PLAN 的 AC-F2-7 行、ARCHITECTURE §7.1 第 4 条。要求：
+
+- 从 `lineup_ready` 换一批最终失败：返回 `502 LLM_ERROR`，`details` 仍带 `discussionId`，message 为「换一批失败，已保留当前阵容，可以重试或直接确认开播」；讨论保持 `lineup_ready`，参与者、`error_message`、`updated_at` 都不变，不追加任何事件；互斥照常释放。
+- 从 `failed` 重新生成仍失败、创建讨论时失败：保持现状。
+- 回归测试（`server/src/routes/api.test.ts`，标题用「待开播讨论换一批失败时保留原阵容与状态且仍可开播」，TEST-PLAN 已按此标题映射）：先成功创建，再让 lineup 任务失败并调用 regenerate，得到 502，校验 code、message 与 `details[0].discussionId`；随后取快照：状态 `lineup_ready`、参与者 ID 与失败前完全相同、`errorMessage` 为 null、`lastEventSeq` 不变；再调用 start 得到 200，状态 `live`，参与者仍是原阵容。现有的「阵容失败保留 failed 状态和讨论 ID 且之后可重新生成」保持通过。
+- 前端不用改：失败时页面保留旧阵容并显示服务端 message；Prompt 09 的 E2E 会用路由拦截覆盖这一点。
+
+### 2. 【质量】真实模型下，抢答要么泛滥要么消失
+
+数据：run-3 的写法（“上一位专家刚发言且存在具体、迫切的核心冲突时选 interrupt”）让模型把所有即时反驳都标成 interrupt：interrupt 3 次、rebut 0 次，还有 3 次“等一下”起句。收紧后 run-4 约 40 次出价没有一次 interrupt。只改措辞会在两个极端之间摆动，所以改为“代码管额度，Prompt 给可操作的条件”。已修订的规格：ARCHITECTURE §3.1 伪代码、§5.B 最后一条、§7.1 第 1 条，PRD 术语表。
+
+- 引擎兜底：每场 `interrupt` 正文发言最多 `max(1, floor(maxTurns / 6))` 次（MAX_TURNS 为 12 或 16 时是 2 次）。额度用完，或上一条正文发言的 act 就是 `interrupt` 时，把本轮出价中的 `interrupt` 改为 `rebut`，其他字段不变；改写放在推送 `participant.state` 之前，保证小窗意图与正文 act 一致。判断写成 `server/src/core` 下的纯函数并单测：额度计算、额度用完、上一条是 interrupt、主持人插话后恢复、允许抢答时原样保留。runner 测试至少覆盖：额度用完后 interrupt 出价以 rebut 发言，且 `participant.state` 的 agentIntent 也是 rebut；不会出现两条相邻正文都是 interrupt。
+- 出价 Prompt：
+  - 删去让模型永远不选 interrupt 的表述（“延后到正常回应会造成误解或遗漏关键条件时才选择”“不得因急于表达而抢答”“偶发而非常态”等），改成可操作的条件：上一条是专家发言；你与它的方向关系是“方向相反”，或它直接否定了你的核心立场；你有一个具体的反驳点，urgency ≥ 0.85；本轮允许抢答。同时满足时用 interrupt，表示要立刻接话；其余具体反驳用 rebut。
+  - 用户消息增加一行，例如「本场抢答：已用 N 次，上限 M 次；本轮可以抢答」或「本轮不能抢答（额度已用完 / 上一条已是抢答）」；不能抢答时明确要求不用 interrupt。同样的信息放进结构化 context（mock 读取的是 context，新增字段不影响现有 mock；mock 是否使用它由 06e 决定）。
+  - 本场还没有抢答时，是否加“满足条件时优先用 interrupt”的提示，由你根据真实运行结果判断，并在报告里说明。
+  - 发言 Prompt 中 interrupt 的指导保留“避免固定插话开头”。
+- 同步 `docs/RUNTIME-PROMPTS.md`：出价模板、输入说明和这次调整的原因。
+- 不要修改 `server/src/llm/mock*`：mock 由随后的 06e 单独处理，引擎改写也会兜底 mock 的抢答次数。如果现有 runner 测试因为依赖连续抢答而失败，修改测试断言，并在报告里写明依据。
+
+### 验证
+
+1. `npm run typecheck -w @aps/server`；`npm test -w @aps/server` 连续 2 次全绿，报告用例总数。
+2. 用 `_review\live\run-discussion.mjs` 重跑 mock 全流程、并发、重连、控制操作与重启恢复（端口 8796 或 8797，临时数据库）。在 qualityChecks 里加入：interrupt 正文条数不超过额度；没有两条相邻正文都是 interrupt；每条 interrupt 正文之前，同一专家在 `participant.state` 中的意图也是 interrupt。
+3. 真实 DeepSeek 跑第 5 次（记录到 `_review\live\deepseek-run-5.md`），配置同前：`MAX_TURNS=12`、`PACING_MS=800`、同一话题、4 位专家。目标：interrupt 正文 1–2 条；rebut ≥ 1；supplement ≥ 1；“等一下”之类固定插话开头至多 1 次；run-4 已达到的检查仍然达到。报告 interrupt、rebut、supplement、raise_hand 各自的出价数与正文数，被引擎改写的出价数，以及与 run-3、run-4 的对比。run-5 没有达到 interrupt 目标时，可以针对原因调整一次 Prompt，再跑第 6 次（`deepseek-run-6.md`）；第 6 次无论结果如何都停止，在报告中分析原因并给出建议。
+4. 结束前按 PID 停掉所有服务进程，确认端口已释放。
+
+约束：不读取、打印或修改 `server/.env`；不安装依赖；只改 `server/`（不含 `server/src/llm/mock*`）、`docs/RUNTIME-PROMPTS.md` 和 `_review\live\` 下你自己的脚本；不改 `shared/`、`web/`、`docs/prompts/` 和其他规格文档；不提交 git。报告：改动文件、两项修复的做法与对应测试、修正过的测试断言及依据、mock 联调结果、DeepSeek 运行数据与观察、遗留问题。

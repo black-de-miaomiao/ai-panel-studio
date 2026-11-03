@@ -60,6 +60,7 @@ run():
       addressed = target
     else：
       bids = 并行请求每位专家出价（fast 档，JSON）
+      按抢答额度改写：额度用完或上一条正文就是 interrupt 时，interrupt 出价改为 rebut（§5.B）
       逐个更新专家 agentState/agentIntent/focus 并推送 participant.state
       if 全部出价请求都失败：
         记一次失败轮次（见 §8.2，连续 3 次转 paused）
@@ -251,6 +252,7 @@ stateDiagram-v2
 - `replyTo` 使用 `H` / `E1..En` 别名，映射为 participant ID；未知别名或指向本人时为 NULL。
 - `focus` 修剪；超过 40 字时截断并以「…」结尾；空字符串变为 NULL。
 - 输入不是对象时，精确返回 `{ wantToSpeak: false, intent: 'raise_hand', urgency: 0, replyToParticipantId: null, focus: null }`。
+- 抢答额度（依赖讨论状态，由引擎在规范化之后、推送 `participant.state` 之前应用）：每场 `interrupt` 正文发言最多 `max(1, floor(maxTurns / 6))` 次（默认 16 轮为 2 次）。额度用完，或上一条正文发言的 act 就是 `interrupt` 时，本轮出价里的 `interrupt` 改为 `rebut`，其他字段不变，保证小窗意图与正文 act 一致。
 
 ### C. 调度打分 v1 `selectNextSpeaker(input)`
 
@@ -459,10 +461,10 @@ interface LLMProvider {
 
 ### 7.1 上下文构建原则
 
-- 每次 LLM 调用无状态，不累积多轮 messages。代码从数据库重建精简上下文：角色卡、话题、阵容名册（别名、姓名、身份与立场标签，例如 `E2 陈澄｜用户研究负责人｜立场：审慎`）、当前共识/分歧、最近 10 条发言和本次任务指令。出价任务还由代码给出上一条发言人及其立场、与本人立场是否相同；洞察任务同时提供最近发言窗口，evidence 可以引用其中任意真实 seq（以 §5.E ③ 的 `validSeqs` 为准）。总结任务例外：提供本场全部发言（最多 40 条；超出时保留开场与最近 39 条），以便完整回顾讨论走向。
+- 每次 LLM 调用无状态，不累积多轮 messages。代码从数据库重建精简上下文：角色卡、话题、阵容名册（别名、姓名、身份与立场标签，例如 `E2 陈澄｜用户研究负责人｜立场：审慎`）、当前共识/分歧、最近 10 条发言和本次任务指令。出价任务还由代码给出上一条发言人及其立场、与本人立场的方向关系（同向、相反、一方中立或谨慎、方向不明），以及本场抢答已用次数和本轮能否抢答；洞察任务同时提供最近发言窗口，evidence 可以引用其中任意真实 seq（以 §5.E ③ 的 `validSeqs` 为准）。总结任务例外：提供本场全部发言（最多 40 条；超出时保留开场与最近 39 条），以便完整回顾讨论走向。
 - 除总结任务（最多 40 条发言）外，上下文长度与讨论总长度无关；不同讨论不会共享对话上下文。
 - 使用 `H`、`E1..En`、`C1..`、`D1..` 代替 UUID。模型不接触内部 ID，别名到数据库 ID 的映射与校验由代码负责。
-- JSON 任务启用 `json_object` 模式并做 zod 校验；失败重试 1 次，再按任务规定采用兜底行为（例如出价规范化的默认值、阵容最终失败转为 `failed`/`502 LLM_ERROR`，洞察失败留待下次触发）。
+- JSON 任务启用 `json_object` 模式并做 zod 校验；失败重试 1 次，再按任务规定采用兜底行为（例如出价规范化的默认值、阵容最终失败返回 `502 LLM_ERROR`：创建或从 `failed` 重新生成时讨论为 `failed`，从 `lineup_ready` 换一批时保留原阵容与状态，洞察失败留待下次触发）。
 - 发言使用中文、1–2 句、不加姓名前缀、不用 Markdown、不写动作描写；只回应 transcript 中真实出现的观点。引用数据需加「据我了解/大致」等限定，不得编造具体报告或机构名称。
 - 共识/分歧必须包含发言 `seq` evidence，后端验证序号存在；无证据不入库。
 - 专家小窗关注点来自独立出价任务的 `focus` 字段，不得使用 `reasoning_content`。

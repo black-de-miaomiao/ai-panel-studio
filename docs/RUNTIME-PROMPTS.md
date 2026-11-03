@@ -60,12 +60,12 @@
 
 ## 2. `bid`
 
-**输入 context：** `{ topic, speakerAlias, speaker, aliasTable, roster, previousUtterance: { line, relation }, addressed, insightsText, transcriptWindow, instruction }`。builder 另接收只用于内部洞察姓名映射的 `aliasMap`，不会写入 `PromptParts.context`。原始 `previousUtterance` 由调用方提供真实 `seq` 和发言别名；builder 用 roster 补出姓名、双方立场标签与立场原文，并按方向计算关系。
+**输入 context：** `{ topic, speakerAlias, speaker, aliasTable, roster, previousUtterance: { line, relation }, addressed, interruptAvailability: { usedCount, limit, allowed, blockReason }, insightsText, transcriptWindow, instruction }`。builder 另接收只用于内部洞察姓名映射的 `aliasMap`，不会写入 `PromptParts.context`。原始 `previousUtterance` 由调用方提供真实 `seq` 和发言别名；builder 用 roster 补出姓名、双方立场标签与立场原文，并按方向计算关系。`interruptAvailability` 由 Runner 根据本场真实抢答正文数和上一条正文 act 生成。
 
 **System 模板全文：**
 
 ```text
-你是中文圆桌讨论中的专家出价器。只根据角色卡、话题、共识分歧和最近发言判断，不补造 transcript 中没有的观点。意图只能是 raise_hand、interrupt、supplement 或 rebut。立场方向相反且有具体漏洞时优先回应并说明；通常用 rebut 表达具体反驳，supplement 必须补充新条件或关键例子。立场标签只提供粗略方向，必须结合双方立场原文和最近发言判断；“有条件支持”与“支持”属于同向，“谨慎/观望”不等于反对，不得仅因标签文字不相同就推断核心冲突。urgency 刻度：0.85–1.00 用于被点名，或对方观点与你的核心立场直接冲突且你有具体反驳；0.60–0.80 用于有明确反驳点或关键补充；0.30–0.55 用于一般补充。主持人已点名当前专家时必须 wantToSpeak=true 且 urgency 至少 0.85；没有真实新内容时 wantToSpeak=false。同一轮通常只有一两位专家有强烈发言欲望；刚发过言，或只想重复同类观点时不要发言。interrupt 与 rebut 的区别：只有上一条是专家发言、你指出了具体且迫切的核心漏洞，并且延后到正常回应会造成误解或遗漏关键条件时，才选择 interrupt；“上一条刚结束”或存在一般反驳点本身不构成抢答理由。满足上述紧急条件且确实要发言时用 interrupt，其他具体反驳用 rebut；不满足时不得因急于表达而抢答。interrupt 应是偶发而非常态，urgency 至少 0.85。focus 是公开关注点，不是推理过程，最多20字。
+你是中文圆桌讨论中的专家出价器。只根据角色卡、话题、共识分歧和最近发言判断，不补造 transcript 中没有的观点。意图只能是 raise_hand、interrupt、supplement 或 rebut。立场方向相反且有具体漏洞时优先回应并说明；supplement 必须补充新条件或关键例子。立场标签只提供粗略方向，必须结合双方立场原文和最近发言判断；“有条件支持”与“支持”属于同向，“谨慎/观望”不等于反对，不得仅因标签文字不相同就推断核心冲突。urgency 刻度：0.85–1.00 用于被点名，或对方观点与你的核心立场直接冲突且你有具体反驳；0.60–0.80 用于有明确反驳点或关键补充；0.30–0.55 用于一般补充。主持人已点名当前专家时必须 wantToSpeak=true 且 urgency 至少 0.85；没有真实新内容时 wantToSpeak=false。同一轮通常只有一两位专家有强烈发言欲望；刚发过言，或只想重复同类观点时不要发言。interrupt 与 rebut 的区别：只有同时满足全部条件且本轮允许抢答时，才选择 interrupt：上一条发言是专家；立场方向关系为“方向相反”，或对方直接否定你的核心立场；你有具体反驳点且 urgency 至少 0.85。interrupt 表示要立刻接话。本轮不能抢答或不满足这些条件时不得选择 interrupt；其他具体反驳用 rebut。focus 是公开关注点，不是推理过程，最多20字。
 只输出 JSON，字段必须完整且严格为：{"wantToSpeak":布尔值,"intent":"raise_hand|interrupt|supplement|rebut","urgency":0到1之间的数字,"replyTo":"H或E1..En或null","focus":"最多20字的字符串或null"}。不得输出思维过程、额外字段或 Markdown。
 ```
 
@@ -85,14 +85,15 @@
 当前专家立场原文：{{currentStance}}
 最近发言（最多10条，按时间正序）：
 {{transcriptWindow}}
+{{interruptAvailabilityLine}}
 本次任务：{{addressedInstruction}}
 ```
 
-`previousUtteranceLine` 是 `#seq 别名 姓名（立场标签：…；立场原文：…）`；方向关系为“方向相同”“方向相反”“一方中立或谨慎”或“方向不明”，另有“主持人发言”和“暂无上一条发言”。例如“有条件支持”与“支持”归为同向；“谨慎/观望”不自动等同反对。被点名时要求举手且 urgency 至少 0.85；上一位专家刚发言且存在具体、迫切的核心立场冲突时选择 `interrupt`，一般轮次反驳仍用 `rebut`；没有直接冲突时不抢答。其他时候结合上下文判断，无新内容、刚发过言或只重复同类观点时不发言。
+Runner 按 `max(1, floor(maxTurns / 6))` 计算每场上限；`usedCount` 只统计已持久化的专家 interrupt 正文，opening/closing 不计入，恢复运行时从 transcript 重新统计。最近一条正文 act 是 interrupt 时本轮也不允许 interrupt；主持人正文插话会解除相邻限制，但不恢复已用额度。`interruptAvailabilityLine` 向模型说明已用次数、上限和本轮许可；额度用完或上一条正文 act 为 interrupt 时，明确要求本轮不用 interrupt。Runner 在出价规范化后、推送 `participant.state` 前再次强制执行同一规则，将受限的正向 interrupt 出价改为 rebut，其他字段不变；只有最终持久化的 interrupt 正文才消耗额度。
 
 **输出与校验：** JSON 字段为 `wantToSpeak`、`intent`、`urgency`、`replyTo`、`focus`。经 `parseJsonLoose` 后由 `normalizeBid` 校验意愿、意图、紧急度与别名；未知别名和指向本人会清空回应对象，关注点最多 40 字。模型提示将公开 focus 收紧到 20 字。格式无效时可用规范化函数的默认不发言值兜底。
 
-**防幻觉：** 只能回应真实 transcript；方向相反且有具体漏洞时优先回应；`interrupt` 仅用于延后正常回应会造成误解或遗漏关键条件的紧急情况，“上一条刚结束”本身不构成抢答理由；其他具体反驳用 `rebut`；补充需增加条件或例子；同一轮通常只鼓励一两位专家强烈发言；焦点只描述公开关注点，不是推理过程。
+**防幻觉与调整原因：** 只能回应真实 transcript；`interrupt` 需要同时满足“上一条是专家发言、方向相反或直接否定核心立场、有具体反驳点且 urgency ≥ 0.85、本轮允许抢答”；其余具体反驳用 `rebut`，补充需增加条件或例子。若本场尚无抢答且额度允许，user 指令会鼓励满足条件时优先选择 interrupt。run3 曾出现 3 次 interrupt、0 次 rebut 和 3 次固定“等一下”开头；run4 收紧措辞后约 40 次出价没有 interrupt。为避免只靠措辞在两端摆动，本次由 Runner 管额度与相邻约束，Prompt 只给可验证的触发条件。焦点只描述公开关注点，不是推理过程。
 
 ---
 

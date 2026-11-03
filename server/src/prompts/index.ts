@@ -9,6 +9,7 @@ import {
 } from '@aps/shared';
 import { formatInsightsForPrompt } from '../core/context';
 import type { AliasMap } from '../core/context';
+import type { InterruptAvailability } from '../core/interruptPolicy';
 
 export interface PromptParts {
   system: string;
@@ -67,6 +68,7 @@ export interface BidPromptInput extends DiscussionPromptInput {
   speaker: PromptRoleCard;
   previousUtterance: PreviousUtterancePromptContext | null;
   addressed?: boolean;
+  interruptAvailability?: InterruptAvailability;
 }
 
 const UUID_PATTERN =
@@ -460,6 +462,15 @@ export function buildLineupPrompt(input: {
 export function buildBidPrompt(input: BidPromptInput): PromptParts {
   const speaker = safeRoleCard(input.speaker);
   const base = discussionContext(input);
+  const interruptAvailability = input.interruptAvailability ?? {
+    usedCount: 0,
+    limit: 1,
+    allowed: true,
+    blockReason: null
+  };
+  const interruptAvailabilityLine = interruptAvailability.allowed
+    ? `本场抢答：已用 ${interruptAvailability.usedCount} 次，上限 ${interruptAvailability.limit} 次；本轮可以抢答${interruptAvailability.usedCount === 0 ? '。本场尚未抢答，如满足全部抢答条件，优先使用 interrupt' : ''}。`
+    : `本场抢答：已用 ${interruptAvailability.usedCount} 次，上限 ${interruptAvailability.limit} 次；本轮不能抢答（${interruptAvailability.blockReason === 'quota_exhausted' ? '额度已用完' : '上一条已是抢答'}），本轮明确不要选择 interrupt。`;
   const previous = previousUtteranceContext(
     input.previousUtterance,
     base.roster,
@@ -471,10 +482,11 @@ export function buildBidPrompt(input: BidPromptInput): PromptParts {
     speaker,
     previousUtterance: previous,
     addressed: input.addressed === true,
+    interruptAvailability,
     instruction:
       '结合上一条发言与立场关系判断是否有真实新内容；无内容时不要发言。'
   };
-  const system = `你是中文圆桌讨论中的专家出价器。只根据角色卡、话题、共识分歧和最近发言判断，不补造 transcript 中没有的观点。意图只能是 raise_hand、interrupt、supplement 或 rebut。立场方向相反且有具体漏洞时优先回应并说明；通常用 rebut 表达具体反驳，supplement 必须补充新条件或关键例子。立场标签只提供粗略方向，必须结合双方立场原文和最近发言判断；“有条件支持”与“支持”属于同向，“谨慎/观望”不等于反对，不得仅因标签文字不相同就推断核心冲突。urgency 刻度：0.85–1.00 用于被点名，或对方观点与你的核心立场直接冲突且你有具体反驳；0.60–0.80 用于有明确反驳点或关键补充；0.30–0.55 用于一般补充。主持人已点名当前专家时必须 wantToSpeak=true 且 urgency 至少 0.85；没有真实新内容时 wantToSpeak=false。同一轮通常只有一两位专家有强烈发言欲望；刚发过言，或只想重复同类观点时不要发言。interrupt 与 rebut 的区别：只有上一条是专家发言、你指出了具体且迫切的核心漏洞，并且延后到正常回应会造成误解或遗漏关键条件时，才选择 interrupt；“上一条刚结束”或存在一般反驳点本身不构成抢答理由。满足上述紧急条件且确实要发言时用 interrupt，其他具体反驳用 rebut；不满足时不得因急于表达而抢答。interrupt 应是偶发而非常态，urgency 至少 0.85。focus 是公开关注点，不是推理过程，最多20字。
+  const system = `你是中文圆桌讨论中的专家出价器。只根据角色卡、话题、共识分歧和最近发言判断，不补造 transcript 中没有的观点。意图只能是 raise_hand、interrupt、supplement 或 rebut。立场方向相反且有具体漏洞时优先回应并说明；supplement 必须补充新条件或关键例子。立场标签只提供粗略方向，必须结合双方立场原文和最近发言判断；“有条件支持”与“支持”属于同向，“谨慎/观望”不等于反对，不得仅因标签文字不相同就推断核心冲突。urgency 刻度：0.85–1.00 用于被点名，或对方观点与你的核心立场直接冲突且你有具体反驳；0.60–0.80 用于有明确反驳点或关键补充；0.30–0.55 用于一般补充。主持人已点名当前专家时必须 wantToSpeak=true 且 urgency 至少 0.85；没有真实新内容时 wantToSpeak=false。同一轮通常只有一两位专家有强烈发言欲望；刚发过言，或只想重复同类观点时不要发言。interrupt 与 rebut 的区别：只有同时满足全部条件且本轮允许抢答时，才选择 interrupt：上一条发言是专家；立场方向关系为“方向相反”，或对方直接否定你的核心立场；你有具体反驳点且 urgency 至少 0.85。interrupt 表示要立刻接话。本轮不能抢答或不满足这些条件时不得选择 interrupt；其他具体反驳用 rebut。focus 是公开关注点，不是推理过程，最多20字。
 只输出 JSON，字段必须完整且严格为：{"wantToSpeak":布尔值,"intent":"raise_hand|interrupt|supplement|rebut","urgency":0到1之间的数字,"replyTo":"H或E1..En或null","focus":"最多20字的字符串或null"}。不得输出思维过程、额外字段或 Markdown。`;
   const user = `话题：${topicBlock(base.topic)}
 当前专家别名：${safeText(input.speakerAlias)}
@@ -489,6 +501,7 @@ ${base.insightsText}
 当前专家立场原文：${safeText(speaker.stance)}
 最近发言（最多10条，按时间正序）：
 ${base.transcriptWindow}
+${interruptAvailabilityLine}
 本次任务：${input.addressed ? '主持人已经点名当前专家，必须举手回应。' : '结合自身立场、上一条发言和最近讨论判断；不得重复刚才已说过的内容。'}`;
   return makeParts(system, user, context);
 }

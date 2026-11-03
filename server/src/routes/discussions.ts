@@ -244,6 +244,25 @@ function persistFailedLineup(
   return result;
 }
 
+function verifyLineupStatus(
+  database: DatabaseSync,
+  discussionId: string,
+  allowedStatuses: readonly DiscussionStatus[]
+): 'saved' | 'not-found' | 'state-conflict' {
+  let result: 'saved' | 'not-found' | 'state-conflict' = 'saved';
+  withTransaction(database, () => {
+    const current = getById(database, discussionId);
+    if (!current) {
+      result = 'not-found';
+      return;
+    }
+    if (!allowedStatuses.includes(current.status)) {
+      result = 'state-conflict';
+    }
+  });
+  return result;
+}
+
 function getSnapshot(
   deps: DiscussionsRouteDeps,
   discussionId: string
@@ -400,20 +419,28 @@ export function createDiscussionsRouter(
       return;
     }
 
+    const preserveReadyLineup = discussion.status === 'lineup_ready';
     lineupGenerating.add(discussionId);
     try {
       let lineup: ReturnType<typeof normalizeLineup>;
       try {
         lineup = await generateLineup(deps, discussion);
       } catch {
-        const failure = persistFailedLineup(
-          deps.db,
-          deps.bus,
-          discussionId,
-          ['lineup_ready', 'failed']
-        );
+        const failure = preserveReadyLineup
+          ? verifyLineupStatus(deps.db, discussionId, ['lineup_ready'])
+          : persistFailedLineup(deps.db, deps.bus, discussionId, ['failed']);
         if (failure !== 'saved') {
           sendLineupWriteFailure(response, failure);
+          return;
+        }
+        if (preserveReadyLineup) {
+          sendError(
+            response,
+            502,
+            'LLM_ERROR',
+            '换一批失败，已保留当前阵容，可以重试或直接确认开播',
+            [{ discussionId }]
+          );
           return;
         }
         sendError(response, 502, 'LLM_ERROR', '暂时无法生成阵容，请稍后重试', [

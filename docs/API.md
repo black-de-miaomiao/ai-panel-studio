@@ -548,7 +548,7 @@ interface DiscussionListItem {
 }
 ```
 
-可能错误：`404 NOT_FOUND`、`409 INVALID_STATE`、`502 LLM_ERROR`。再次生成失败时状态为 `failed` 并保留错误信息。
+可能错误：`404 NOT_FOUND`、`409 INVALID_STATE`（含同一讨论的阵容正在生成中）、`502 LLM_ERROR`（`details` 带 `discussionId`）。失败后的状态取决于请求前的状态：从 `failed` 重新生成仍失败时保持 `failed`，并更新错误信息；从 `lineup_ready` 换一批失败时，讨论保持 `lineup_ready`，原阵容与 `errorMessage` 不变，也不产生新事件，用户可以重试，或直接确认原阵容开播。
 
 ### 3.6 `POST /api/discussions/:id/start`
 
@@ -576,7 +576,7 @@ interface DiscussionListItem {
 }
 ```
 
-可能错误：`404 NOT_FOUND`、`409 INVALID_STATE`。
+可能错误：`404 NOT_FOUND`、`409 INVALID_STATE`（含阵容正在生成中，例如“换一批”尚未返回）。
 
 ### 3.7 `POST /api/discussions/:id/pause`
 

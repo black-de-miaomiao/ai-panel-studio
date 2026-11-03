@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  BidIntent,
   Discussion,
   DiscussionStatus,
   HostAct,
@@ -19,6 +20,10 @@ import {
   type AliasMap
 } from '../core/context';
 import { decideHostAction } from '../core/hostPolicy';
+import {
+  enforceInterruptAvailability,
+  resolveInterruptAvailability
+} from '../core/interruptPolicy';
 import { mergeInsights } from '../core/insights';
 import { LLMFormatError, parseJsonLoose } from '../core/json';
 import { createRng } from '../core/rng';
@@ -217,6 +222,19 @@ export class DiscussionRunner {
   private lastSpeakerId: string | null = null;
   private recentExpertSpeakerIds: string[] = [];
   private lastSpokeTurn: Record<string, number> = {};
+  private readonly modelSpeakingBidCounts: Record<BidIntent, number> = {
+    raise_hand: 0,
+    interrupt: 0,
+    supplement: 0,
+    rebut: 0
+  };
+  private readonly effectiveSpeakingBidCounts: Record<BidIntent, number> = {
+    raise_hand: 0,
+    interrupt: 0,
+    supplement: 0,
+    rebut: 0
+  };
+  private interruptBidRewriteCount = 0;
 
   constructor(
     database: DatabaseSync,
@@ -584,6 +602,19 @@ export class DiscussionRunner {
         }
       : null;
     const base = this.promptInput(context);
+    const bodyUtterances = context.utterances.filter(
+      ({ act }) => act !== 'opening' && act !== 'closing'
+    );
+    const expertIds = new Set(experts.map(({ id }) => id));
+    const usedInterruptCount = bodyUtterances.filter(
+      ({ act, participantId }) =>
+        act === 'interrupt' && expertIds.has(participantId)
+    ).length;
+    const interruptAvailability = resolveInterruptAvailability({
+      maxTurns: context.discussion.maxTurns,
+      usedCount: usedInterruptCount,
+      lastBodyAct: bodyUtterances.at(-1)?.act ?? null
+    });
 
     return Promise.allSettled(
       experts.map(async (participant): Promise<BidResult> => {
@@ -594,7 +625,8 @@ export class DiscussionRunner {
             speakerAlias: aliasesById.get(participant.id) ?? 'E1',
             speaker: roleCard(participant),
             previousUtterance,
-            addressed: this.addressed === participant.id
+            addressed: this.addressed === participant.id,
+            interruptAvailability
           });
           const response = await this.llm.complete({
             task: 'bid',
@@ -609,15 +641,33 @@ export class DiscussionRunner {
             selfId: participant.id,
             aliasToParticipantId: aliasMap
           });
-          const bid = { ...normalized, participantId: participant.id };
+          const bid = enforceInterruptAvailability(
+            normalized,
+            interruptAvailability
+          );
+          if (normalized.wantToSpeak) {
+            this.modelSpeakingBidCounts[normalized.intent] += 1;
+            this.effectiveSpeakingBidCounts[bid.intent] += 1;
+            if (normalized.intent === 'interrupt' && bid.intent === 'rebut') {
+              this.interruptBidRewriteCount += 1;
+            }
+          }
+          const bidWithParticipant = {
+            ...bid,
+            participantId: participant.id
+          };
           const currentlyLive = this.isLive();
           this.publishParticipantState(
             participant.id,
-            currentlyLive && bid.wantToSpeak ? 'preparing' : 'idle',
-            currentlyLive && bid.wantToSpeak ? bid.intent : null,
-            bid.focus
+            currentlyLive && bidWithParticipant.wantToSpeak
+              ? 'preparing'
+              : 'idle',
+            currentlyLive && bidWithParticipant.wantToSpeak
+              ? bidWithParticipant.intent
+              : null,
+            bidWithParticipant.focus
           );
-          return { participant, bid };
+          return { participant, bid: bidWithParticipant };
         } catch (error) {
           if (!this.stopped) {
             this.logFailure('bid', error);
@@ -1177,6 +1227,21 @@ export class DiscussionRunner {
     }
     const endedAt = isoNow();
     this.changeStatus('ended', { endedAt }, endedAt);
+    this.reportBidMetrics();
+  }
+
+  private reportBidMetrics(): void {
+    if (process.env.APS_REPORT_BID_METRICS !== '1') {
+      return;
+    }
+    console.info(
+      `APS_BID_METRICS ${JSON.stringify({
+        discussionId: this.discussionId,
+        modelSpeakingBids: this.modelSpeakingBidCounts,
+        effectiveSpeakingBids: this.effectiveSpeakingBidCounts,
+        interruptBidRewrites: this.interruptBidRewriteCount
+      })}`
+    );
   }
 
   private async generateSummary(

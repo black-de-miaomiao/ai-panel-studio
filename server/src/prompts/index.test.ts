@@ -104,7 +104,13 @@ function allPrompts() {
       ...discussion,
       speakerAlias: 'E1',
       speaker: card,
-      previousUtterance: { seq: 12, speakerAlias: 'E2' }
+      previousUtterance: { seq: 12, speakerAlias: 'E2' },
+      interruptAvailability: {
+        usedCount: 0,
+        limit: 2,
+        allowed: true,
+        blockReason: null
+      }
     }),
     buildUtterancePrompt({
       ...discussion,
@@ -229,15 +235,80 @@ describe('runtime prompt builders', () => {
     expect(bid?.system).toContain(
       '立场方向相反且有具体漏洞时优先回应并说明'
     );
-    expect(bid?.system).toContain('只有上一条是专家发言');
-    expect(bid?.system).toContain('核心立场直接冲突');
+    expect(bid?.system).toContain('上一条发言是专家');
+    expect(bid?.system).toContain('方向相反');
+    expect(bid?.system).toContain('直接否定你的核心立场');
+    expect(bid?.system).toContain('有具体反驳点且 urgency 至少 0.85');
+    expect(bid?.system).toContain('本轮允许抢答');
     expect(bid?.system).toContain('interrupt 与 rebut 的区别');
-    expect(bid?.system).toContain('不构成抢答理由');
     expect(bid?.system).toContain('其他具体反驳用 rebut');
-    expect(bid?.system).toContain('interrupt 应是偶发而非常态');
-    expect(bid?.system).toContain('不满足时不得因急于表达而抢答');
+    expect(bid?.system).not.toContain('延后到正常回应');
+    expect(bid?.system).not.toContain('interrupt 应是偶发而非常态');
     expect(bid?.system).toContain('有条件支持”与“支持”属于同向');
     expect(bid?.system).toContain('“谨慎/观望”不等于反对');
+  });
+
+  it('出价同时提供抢答额度与本轮许可，首次可用额度时明确鼓励符合条件者抢答', () => {
+    const available = allPrompts()[1];
+    const availableContext = available?.context as {
+      interruptAvailability?: {
+        usedCount: number;
+        limit: number;
+        allowed: boolean;
+        blockReason: string | null;
+      };
+    };
+    const blocked = buildBidPrompt({
+      ...discussion,
+      speakerAlias: 'E1',
+      speaker: card,
+      previousUtterance: { seq: 12, speakerAlias: 'E2' },
+      interruptAvailability: {
+        usedCount: 2,
+        limit: 2,
+        allowed: false,
+        blockReason: 'quota_exhausted'
+      }
+    });
+    const afterInterrupt = buildBidPrompt({
+      ...discussion,
+      speakerAlias: 'E1',
+      speaker: card,
+      previousUtterance: { seq: 12, speakerAlias: 'E2' },
+      interruptAvailability: {
+        usedCount: 1,
+        limit: 2,
+        allowed: false,
+        blockReason: 'previous_interrupt'
+      }
+    });
+
+    expect(available?.user).toContain(
+      '本场抢答：已用 0 次，上限 2 次；本轮可以抢答'
+    );
+    expect(available?.user).toContain('本场尚未抢答');
+    expect(availableContext.interruptAvailability).toEqual({
+      usedCount: 0,
+      limit: 2,
+      allowed: true,
+      blockReason: null
+    });
+    expect(blocked.user).toContain(
+      '本场抢答：已用 2 次，上限 2 次；本轮不能抢答（额度已用完）'
+    );
+    expect(blocked.user).toContain('本轮明确不要选择 interrupt');
+    expect(blocked.context).toMatchObject({
+      interruptAvailability: {
+        usedCount: 2,
+        limit: 2,
+        allowed: false,
+        blockReason: 'quota_exhausted'
+      }
+    });
+    expect(afterInterrupt.user).toContain(
+      '本场抢答：已用 1 次，上限 2 次；本轮不能抢答（上一条已是抢答）'
+    );
+    expect(afterInterrupt.user).toContain('本轮明确不要选择 interrupt');
   });
 
   it('interrupt 话语避免重复固定插话开头', () => {
@@ -264,7 +335,13 @@ describe('runtime prompt builders', () => {
         ),
         speakerAlias: 'E1',
         speaker: card,
-        previousUtterance: { seq: 3, speakerAlias: 'E2' }
+        previousUtterance: { seq: 3, speakerAlias: 'E2' },
+        interruptAvailability: {
+          usedCount: 0,
+          limit: 2,
+          allowed: true,
+          blockReason: null
+        }
       });
 
     expect(promptFor('支持').user).toContain(

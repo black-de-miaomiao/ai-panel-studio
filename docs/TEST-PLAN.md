@@ -24,6 +24,7 @@
 | AC-F2-4 | `server/src/routes/api.test.ts`：「待开播讨论换阵容后参与者 ID 改变而直播状态换阵容返回冲突」 | 选择「换一批」后仍可确认新阵容。 |
 | AC-F2-5 | `server/src/routes/api.test.ts`：「阵容失败保留 failed 状态和讨论 ID 且之后可重新生成」 | 失败显示中文提示并可在不重填话题时重试。 |
 | AC-F2-6 | `server/src/core/json.test.ts`：「解析纯 JSON 对象」「解析带 json 标记的代码围栏」；`server/src/routes/api.test.ts`：「创建成功后返回默认四位专家及已分配角色颜色和头像」 | 页面显示嘉宾信息而不是模型 JSON 原文。 |
+| AC-F2-7 | `server/src/routes/api.test.ts`：「待开播讨论换一批失败时保留原阵容与状态且仍可开播」 | 换一批请求失败（路由拦截返回 502）后仍显示原阵容和中文错误，「确认阵容，进入演播厅」可以进入演播厅。 |
 | AC-F3-1 | `server/src/engine/runner.test.ts`：「完整运行后从直播经总结结束且开场收尾与正文计数符合上限」；`server/src/routes/api.test.ts`：「开播仅允许 lineup_ready 且重复开播返回冲突」 | 确认阵容后状态进入直播，第一条 Transcript 发言为主持人开场。 |
 | AC-F3-2 | `server/src/core/scheduler.test.ts`：「上一位专家即使出价最高也不能连续发言」「紧急度相同时直接反驳上一位发言人的出价胜过普通举手」「三十轮中按出价形成非机械且无固定座位周期的发言序列」；`server/src/core/hostPolicy.test.ts`：「上一条发言来自主持人且上一轮无人出价时仍邀请最少发言专家」；`server/src/engine/runner.test.ts`：「连续两条专家发言不会由同一专家完成」「开场后首轮无人出价时主持人点名并继续至正常结束」 | 观察多轮对话可见由观点与出价驱动的非机械轮转。 |
 | AC-F3-3 | `server/src/engine/runner.test.ts`：「每条完成事件之前先有同 ID 的开始事件且 speaking 只标记当前发言人」；`server/src/routes/stream.test.ts`：「直播讨论能够接收发言开始增量和完成事件」 | 字幕展示增量，收到完成事件后以最终文本替换。 |
@@ -63,7 +64,7 @@
 | LLM 任务档位、思考模式、温度、maxTokens 透传、并发与 JSON 标志 | `server/src/llm/gateway.test.ts` |
 | OpenAI 兼容请求、思考模式字段映射、Reasoning 丢弃、SSE 分片、重试、密钥保护与超时 | `server/src/llm/openaiCompatible.test.ts` |
 | Mock 确定性、任务结构、真实关系证据、流式一致性与故障注入 | `server/src/llm/mock.test.ts` |
-| 讨论运行、暂停/结束、洞察重试、错误恢复及并行隔离 | `server/src/engine/runner.test.ts`、`server/src/engine/isolation.test.ts` |
+| 讨论运行、暂停/结束、抢答额度、洞察重试、错误恢复及并行隔离 | `server/src/engine/runner.test.ts`、`server/src/engine/isolation.test.ts` |
 | REST 状态、输入校验、错误响应、删除与密钥边界 | `server/src/routes/api.test.ts` |
 | SSE 首事件、事件补发游标、重连优先级、观众数与实时片段 | `server/src/routes/stream.test.ts` |
 
