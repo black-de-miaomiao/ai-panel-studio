@@ -1,19 +1,11 @@
-import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync, rmSync } from 'node:fs';
 import { loadConfig, loadDotEnv } from '../src/config';
-import { openDatabase } from '../src/db/connection';
-
-const serverRoot = fileURLToPath(new URL('../', import.meta.url));
-const schemaPath = fileURLToPath(new URL('../db/schema.sql', import.meta.url));
-const seedPath = fileURLToPath(new URL('../db/seed.sql', import.meta.url));
-
-function resolveDatabasePath(path: string): string {
-  if (path === ':memory:' || isAbsolute(path)) {
-    return path;
-  }
-  return resolve(serverRoot, path);
-}
+import {
+  initSchema,
+  openDatabase,
+  resolveDatabasePath,
+  seedIfEmpty
+} from '../src/db/connection';
 
 loadDotEnv();
 const config = loadConfig();
@@ -31,14 +23,25 @@ if (process.argv.includes('--reset') && databasePath !== ':memory:') {
 const database = openDatabase(databasePath);
 
 try {
-  if (existsSync(schemaPath)) {
-    database.exec(readFileSync(schemaPath, 'utf8'));
-  }
-  if (existsSync(seedPath)) {
-    database.exec(readFileSync(seedPath, 'utf8'));
-  }
+  initSchema(database);
+  seedIfEmpty(database);
+
+  const tableNames = [
+    'discussions',
+    'participants',
+    'utterances',
+    'insights',
+    'insight_stances',
+    'events'
+  ] as const;
+  const rowCounts = tableNames.map((tableName) => {
+    const row = database
+      .prepare(`SELECT COUNT(*) AS count FROM ${tableName}`)
+      .get() as { count: number } | undefined;
+    return `${tableName}=${row?.count ?? 0}`;
+  });
+
+  console.info(`Database initialized. Row counts: ${rowCounts.join(', ')}`);
 } finally {
   database.close();
 }
-
-console.info('db init done');
