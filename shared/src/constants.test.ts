@@ -87,11 +87,15 @@ describe('shared constants', () => {
     expect(AGENT_STATE_LABELS.preparing).toBe('准备发言');
     expect(INTENT_LABELS.raise_hand).toBe('举手');
     expect(ACT_LABELS.follow_up).toBe('追问');
-    expect(LOBBY_GROUPS).toEqual({
-      直播中: ['live', 'summarizing', 'paused'],
-      待开播: ['lineup_ready', 'draft', 'failed'],
-      往期回放: ['ended']
-    });
+    expect(LOBBY_GROUPS).toEqual([
+      { key: 'live', label: '直播中', statuses: ['live', 'summarizing', 'paused'] },
+      {
+        key: 'upcoming',
+        label: '待开播',
+        statuses: ['lineup_ready', 'draft', 'failed']
+      },
+      { key: 'replay', label: '往期回放', statuses: ['ended'] }
+    ]);
     expect(
       Object.entries(STATUS_PRIORITY)
         .sort(([, left], [, right]) => right - left)

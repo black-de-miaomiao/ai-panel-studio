@@ -131,11 +131,16 @@ export const ACT_LABELS = {
   rebut: '反驳'
 } as const;
 
-export const LOBBY_GROUPS = {
-  直播中: ['live', 'summarizing', 'paused'],
-  待开播: ['lineup_ready', 'draft', 'failed'],
-  往期回放: ['ended']
-} as const;
+export const LOBBY_GROUPS = [
+  { key: 'live', label: '直播中', statuses: ['live', 'summarizing', 'paused'] },
+  {
+    key: 'upcoming',
+    label: '待开播',
+    statuses: ['lineup_ready', 'draft', 'failed']
+  },
+  { key: 'replay', label: '往期回放', statuses: ['ended'] }
+] as const;
+export type LobbyGroupKey = (typeof LOBBY_GROUPS)[number]['key'];
 
 export const STATUS_PRIORITY = {
   live: 7,
