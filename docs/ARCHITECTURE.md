@@ -61,11 +61,14 @@ run():
     else：
       bids = 并行请求每位专家出价（fast 档，JSON）
       逐个更新专家 agentState/agentIntent/focus 并推送 participant.state
+      if 全部出价请求都失败：
+        记一次失败轮次（见 §8.2，连续 3 次转 paused）
+        continue
       pick = selectNextSpeaker(bids, ctx, rng)
       if pick 为空：
         ctx.noBidders = true
         continue（下一轮由主持人点名）
-      speakExpert(pick)
+      speakExpert(pick)   // 发言失败同样记失败轮次，成功则清零
       addressed = null
     turnCount += 1
     持久化并推送 discussion.status
@@ -278,8 +281,8 @@ stateDiagram-v2
 
 按顺序匹配，命中即返回：
 
-0. 上一条发言来自主持人：`{ action: 'experts' }`。
-1. 上一轮无人出价（`noBidders`）：返回 `invite`，目标是 `speakCount` 最少的专家，并列取 seat 最小者。
+0. 上一轮无人出价（`noBidders`）：返回 `invite`，目标是 `speakCount` 最少的专家，并列取 seat 最小者。即使上一条发言来自主持人（例如开场后首轮无人出价）也优先适用：点名本身是一条正文发言，且被点名者在下一轮出价中必然成为候选，从而保证主循环总能推进。
+1. 上一条发言来自主持人：`{ action: 'experts' }`。
 2. `expertTurnsSinceHost ≥ HOST_INTERVAL`（3）：
    - 存在 active 分歧且其 `stances` 含 ≥ 2 名专家：先取 `updatedAtSeq` 最大的那条分歧，返回 `bridge`，再选取该分歧中不是上一位发言人且 `speakCount` 最少的专家，并列取 seat 最小者。
    - 否则返回 `follow_up`，目标为上一位专家发言人。
@@ -398,6 +401,7 @@ type LLMTask =
   | 'insights'
   | 'summary';
 type LLMTier = 'quality' | 'fast';
+type LLMThinking = 'disabled' | 'low' | 'high';
 
 interface LLMRequest {
   task: LLMTask;
@@ -406,6 +410,7 @@ interface LLMRequest {
   json?: boolean;
   temperature?: number;
   maxTokens?: number;
+  thinking?: LLMThinking; // 省略时使用提供商默认值
   context?: unknown; // 仅 mock 使用的结构化上下文
   signal?: AbortSignal;
   discussionId?: string;
@@ -425,18 +430,20 @@ interface LLMProvider {
 }
 ```
 
-| 任务 | 档位 | 默认模型 | `temperature` | 说明 |
-|---|---|---|---:|---|
-| `lineup` | `quality` | `deepseek-v4-pro` | 0.9 | 阵容生成，JSON。 |
-| `summary` | `quality` | `deepseek-v4-pro` | 0.5 | 主持人总结，流式自然语言。 |
-| `bid` | `fast` | `deepseek-flash` | 0.7 | 专家出价，JSON。 |
-| `utterance` | `fast` | `deepseek-flash` | 0.8 | 专家发言，流式。 |
-| `host` | `fast` | `deepseek-flash` | 0.7 | 主持人开场、追问、串联、点名，流式。 |
-| `insights` | `fast` | `deepseek-flash` | 0.2 | 共识/分歧提炼，JSON。 |
+| 任务 | 档位 | 默认模型 | 思考模式 | `temperature` | `maxTokens` | 说明 |
+|---|---|---|---|---:|---:|---|
+| `lineup` | `quality` | `deepseek-v4-pro` | `disabled` | 0.9 | 3000 | 阵容生成，JSON。 |
+| `summary` | `quality` | `deepseek-v4-pro` | `disabled` | 0.5 | 1500 | 主持人总结，流式自然语言。 |
+| `bid` | `fast` | `deepseek-flash` | `disabled` | 0.7 | 300 | 专家出价，JSON。 |
+| `utterance` | `fast` | `deepseek-flash` | `disabled` | 0.8 | 300 | 专家发言，流式。 |
+| `host` | `fast` | `deepseek-flash` | `disabled` | 0.7 | 300 | 主持人开场、追问、串联、点名，流式。 |
+| `insights` | `fast` | `deepseek-flash` | `disabled` | 0.2 | 1500 | 共识/分歧提炼，JSON。 |
+
+思考模式映射（以 DeepSeek Chat Completions 文档为准）：`disabled` → 请求体发送 `"thinking": {"type": "disabled"}` 与 `temperature`；`low` / `high` → 发送 `"thinking": {"type": "enabled"}` 与 `"reasoning_effort": "low" | "high"`，此时不发送 `temperature`（思考模式下无效），`maxTokens` 必须同时容纳思考内容与回答。`maxTokens` 统一映射为请求体的 `max_tokens`。
 
 - 提供商选择：显式设置 `LLM_PROVIDER` 时优先使用；否则有 `LLM_API_KEY` 就使用 `deepseek`，没有则使用 `mock` 并在启动日志提示。
 - DeepSeek 使用 OpenAI 兼容 Chat Completions：`POST {LLM_BASE_URL}/chat/completions`，Authorization 为 Bearer Key。JSON 任务设置 `response_format: {"type":"json_object"}`。
-- 可用模型为 `deepseek-v4-pro`（质量档，实测约 8 秒/次，带推理）与 `deepseek-flash`（速度档，实测约 1.5 秒/次，带推理）；两者都会返回 `reasoning_content`，后端必须丢弃。
+- 可用模型为 `deepseek-v4-pro`（质量档）与 `deepseek-flash`（速度档）。两者默认开启思考模式并返回 `reasoning_content`。本应用所有任务默认关闭思考模式：首字延迟更低、`temperature` 生效，并且从源头上不产生隐藏思维链；专家小窗的“关注点”只来自出价任务的公开 `focus` 字段。网关仍须防御性地丢弃任何 `reasoning_content`。
 - 流式解析 `data:` 行、忽略 `[DONE]`，只取 `choices[0].delta.content`。`reasoning_content` 一律丢弃，不进入应用上下文。
 - 超时：quality 90 秒、fast 30 秒。网络错误、429、5xx 重试 1 次，退避 800ms。全局并发上限由 `LLM_MAX_CONCURRENCY` 控制。
 - 日志只记录 task、model、耗时与 token 用量，不记录 Key 和推理内容。
@@ -730,9 +737,9 @@ JSON 输出：
 
 | 环节 | 规定行为 |
 |---|---|
-| 专家出价 | 单次出价失败视为该专家本轮不发言，不中止其他专家出价或主循环。 |
+| 专家出价 | 单次出价失败视为该专家本轮不发言，不中止其他专家出价或主循环。若一轮中全部专家的出价请求都失败（请求错误，而不是不想发言），该轮计为一次失败轮次，不置 `noBidders`。 |
 | 发言生成 | 失败重试 1 次；仍失败则推送瞬时 `error`（「某嘉宾暂时掉线，讨论继续」）、跳过本轮且不计 `turnCount`。 |
-| 连续发言失败 | 连续 3 轮失败后状态转为 `paused`，`error_message` 写「大模型服务暂时不可用，讨论已暂停，可稍后继续」。 |
+| 连续发言失败 | 发言失败轮次与“全部出价失败”轮次共用一个连续失败计数，任一条发言成功即清零。连续 3 轮失败后状态转为 `paused`，`error_message` 写「大模型服务暂时不可用，讨论已暂停，可稍后继续」。 |
 | 洞察提炼 | 失败记日志；下次触发时把遗漏的发言一并处理，不阻塞主循环。 |
 | 主持人总结 | 失败重试 1 次；仍失败时根据当前共识/分歧用代码模板生成自然语言兜底总结。 |
 | 阵容生成 | JSON 解析或校验失败时将错误原因反馈给模型再试 1 次；仍失败则讨论为 `failed`，接口返回 `502 LLM_ERROR`。 |
