@@ -8,7 +8,7 @@
 |---|---|---|
 | 单元 | `server/src/core/` 纯函数、句子与 JSON 规则；LLM 任务路由和提供商边界 | Vitest；输入显式、注入 RNG；OpenAI 兼容提供商使用 fake `fetch` 与内存 `ReadableStream`，不访问网络。 |
 | 集成 | Runner、讨论隔离、REST、SSE 与 SQLite | Vitest + `node:sqlite` `:memory:` + repository/schema fixtures + mock LLM；SSE 使用随机本地端口。只检查可观察的公开事件、持久状态和共享契约。 |
-| E2E | 浏览器中的大厅、阵容确认、直播、控制、回放与响应式布局 | Playwright，后续 E2E 阶段实现；使用 mock LLM，不依赖外网或真实 API Key。 |
+| E2E | 浏览器中的大厅、阵容确认、直播、控制、回放与响应式布局 | Playwright（已实现，见 §5、§6）；使用 mock LLM，不依赖外网或真实 API Key。 |
 
 ## 2. 需求 → 测试映射
 
@@ -138,7 +138,7 @@
 -  Chromium 的 `context.setOffline(true)` 不会断开已建立的 SSE 连接（实测：离线期间事件仍持续到达、徽标不变）。`realtime.spec.ts` 因此用 `page.route` 拒绝新的 stream 请求来“拔网线”，`setOffline` 同时让整个上下文断网，恢复时两者一起解除；已在用例注释中说明。
 -  mock 的追问回答（follow-up answer）有的句子不带句末标点（如“可以分地点记录调整次数与额外投入”）；陈述引导偶用议题问句作前缀（如“就效果应该如何衡量而言：”）。仅记录现象，未改 `server/src/llm/mock*`。
 
-## 6. 已确认
+## 7. 已确认
 
 - `SchedulerInput.seatByParticipantId` 是座位信息映射；用于在出价分数、紧急度及随机扰动仍并列时按较小 seat 裁决。
 - `NormalizedBid.participantId` 保持可选，因为无效输入的精确默认对象不包含该字段；Runner 负责将专家身份与出价配对。

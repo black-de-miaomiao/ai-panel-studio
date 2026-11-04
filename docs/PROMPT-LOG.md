@@ -27,9 +27,10 @@
 | 07 续派 1 | 【TDD 阶段】 | [07-tdd-green-engine.md](prompts/07-tdd-green-engine.md) | luna-worker 子代理（配置为 GPT-6 Luna） | `d6aabc4` feat(server): 讨论引擎、事件总线、REST 与 SSE 落地 |
 | 07 续派 2 | 【TDD 阶段】 | [07-tdd-green-engine.md](prompts/07-tdd-green-engine.md) | luna-worker 子代理（配置为 GPT-6 Luna） | `4f40e75` feat(server): 抢答额度改由 Runner 控制；换一批失败时保留原阵容 |
 | 07 续派 3 | 【TDD 阶段】 | [07-tdd-green-engine.md](prompts/07-tdd-green-engine.md) | luna-worker 子代理（配置为 GPT-6 Luna） | `f5ee7fa` feat(server): 出价格式失败重试一次；调度增加发言行为多样性加成 |
-| 06e（占位） | 【TDD 阶段】 | [06e-mock-discussion-flow.md](prompts/06e-mock-discussion-flow.md) | luna-worker 子代理（配置为 GPT-6 Luna；未执行） | 待定 |
-| 09（占位） | 【E2E 阶段】 | [09-e2e.md](prompts/09-e2e.md) | luna-worker 子代理（配置为 GPT-6 Luna；未执行） | 待定 |
-| 10（占位） | 【交付】 | [10-docs-delivery.md](prompts/10-docs-delivery.md) | luna-worker 子代理（配置为 GPT-6 Luna；未执行） | 待定 |
+| 07b | 【TDD 阶段】 | [07b-error-body-contract.md](prompts/07b-error-body-contract.md) | luna-worker 子代理（配置为 GPT-6 Luna） | `7fb13e7` fix(server): 所有错误响应统一带 details，前端不再丢失服务端中文提示 |
+| 06e | 【TDD 阶段】 | [06e-mock-discussion-flow.md](prompts/06e-mock-discussion-flow.md) | luna-worker 子代理（配置为 GPT-6 Luna） | `16d238f` chore: 接手快照（首轮与续派 1）；`ee3f5b0` fix(server): llm-smoke 脚本补传 lastInterventionAct；`80f52f0` feat(llm): mock 讨论质量收口（续派 2） |
+| 09 | 【E2E 阶段】 | [09-e2e.md](prompts/09-e2e.md) | luna-worker 子代理（配置为 GPT-6 Luna） | `5421a22` fix(server): 洞察立场按座位排序、同毫秒洞察按写入顺序，E2E 增加可复现讨论 ID；`179aca1` test(e2e): Playwright 端到端九个场景与质量闭环 |
+| 10 | 【交付】 | [10-docs-delivery.md](prompts/10-docs-delivery.md) | luna-worker 子代理（配置为 GPT-6 Luna） | 文档与交付（本文所在提交） |
 
 ## 按时间顺序的核心 Prompt
 
@@ -883,11 +884,177 @@ Prompt 原文摘录：
 
 说明：编排日志记录 run-5 的 5 次出价格式失败均未重试，且 7 次想发言的 supplement 未能胜出；续派 3 因而只在 `LLMFormatError` 时重试一次，并增加最近三条专家正文未出现过的行为加分。run-6 的 5 次格式失败均经一次重试恢复，但 run-5 与 run-6 仍都未生成共识。
 
-## 【TDD 阶段】Prompt 06e · Mock 讨论走向
-（第二部分补齐）
+## 【TDD 阶段】Prompt 07b · 错误响应契约评审：`details` 始终为数组
 
-## 【E2E 阶段】Prompt 09 · Playwright 系统级端到端测试
-（第二部分补齐）
+执行者：luna-worker 子代理（配置为 GPT-6 Luna）；对应提交：`7fb13e7` fix(server): 所有错误响应统一带 details，前端不再丢失服务端中文提示。
+
+Prompt 原文摘录：
+
+```text
+## 背景
+
+Prompt 10 第二部分 A 在对齐 API.md 与实现时发现：`shared/src/api.ts` 的 `ApiErrorBodySchema` 要求 `error.details` 是数组，且对象为 strict；API.md §1 的错误格式示例也一直带 `"details": []`。但服务端有三处错误出口，在没有附加信息时省略了 `details`：
+
+- `server/src/app.ts`：errorHandler（zod 校验失败、JSON 解析失败、500 INTERNAL）和末尾的 404「接口不存在」；
+- `server/src/routes/discussions.ts` 的 `sendError`：只有传入 details 时才写这个字段，所有 400、404、409、500 路径都没传；
+- `server/src/routes/stream.ts` 的 `sendError`：从不写 `details`（SSE 建流前的 404 和 400「事件游标无效」）。
+
+前端 `web/src/api/httpApi.ts` 的 `readApiError` 用 `ApiErrorBodySchema` 严格解析。解析失败时，5xx 变成 NETWORK「无法连接服务器，请确认后端已启动」，其他状态变成 INTERNAL「服务返回了无法识别的数据」。结果是服务端给出的中文 message 全部丢失。例如用户在换一批进行中点击开播，服务端返回 409「阵容正在更新，暂时无法开播」，页面却显示“服务返回了无法识别的数据”。
+
+（中略）
+
+## 决定（规格已由编排者先行修订）
+
+以契约为准修服务端，`shared/` 和 `web/` 不改：所有错误响应都带 `details`，没有附加信息时为 `[]`。已修订的规格：API.md §1「通用错误格式」（删除了“待处理的不一致”说明），TEST-PLAN §3 的 REST 一行。先读这两处再动手。本次不改 `docs/` 下的任何文件，发现规格仍有矛盾时在报告中指出。
+
+## 要求
+
+1. 新建 `server/src/routes/errors.ts`，导出唯一的错误出口，例如 `sendApiError(response, status, code, message, details = [])`。`code` 使用 `@aps/shared` 的 `ApiErrorCode` 类型，响应体用 `ApiErrorBody` 类型标注，让类型检查保证字段齐全。
+2. `app.ts` 的 errorHandler 与 404、`discussions.ts`、`stream.ts` 全部改用它，删掉两个本地 `sendError`。状态码、code、message 与现有行为完全一致；现有 502 响应中带 `discussionId` 的 details 保持不变。
+
+（中略）
+
+## 测试（先红后绿）
+
+- `server/src/routes/api.test.ts` 新增「各类错误响应均符合共享错误契约且 details 始终为数组」。逐个触发下列错误，对每个响应体断言 `ApiErrorBodySchema.safeParse(body).success` 为 true，状态码和 code 符合 API.md；除 502 外，`details` 都等于 `[]`。
+```
+
+完整原文：[docs/prompts/07b-error-body-contract.md](prompts/07b-error-body-contract.md)。
+
+说明：编排日志记载，第二部分 A 对齐文档时发现服务端三处错误出口省略 `details`，前端严格解析后把服务端中文 message 全部丢失；编排者以契约为准先行修订 API.md 与 TEST-PLAN，再派 07b 先红后绿统一错误出口，并用独立 worktree 验证该提交单独成立。
+
+## 【TDD 阶段】Prompt 06e · Mock 讨论走向：观点推进、补充与共识、主持串联
+
+执行者：luna-worker 子代理（配置为 GPT-6 Luna）；对应提交：`16d238f` chore: 接手快照（首轮与续派 1 产出）；`ee3f5b0` fix(server): llm-smoke 脚本补传 lastInterventionAct；`80f52f0` feat(llm): mock 讨论质量收口（续派 2）。
+
+Prompt 原文摘录：
+
+```text
+> 为什么还要一轮：README 会告诉评审者“没有 Key 也能用 mock 演示”，E2E 也全部基于 mock。06c、06d 之后每一句话都通顺了，但把 10 轮连起来读（`C:\Users\123\Desktop\mianshiti\_review\smoke\mock-demo-1.txt`），讨论没有推进：每个人一直在重复自己的立场，没有人表示认同，主持人的串联也问错了人。
+
+## 现象（摘自 mock-demo-1）、根因与要求
+
+### 1. 观点推进：不再复读立场
+
+- 现象：沈怀瑾三次发言都是“我担心基础任务减少会挤压新人练习”（#3、#6、#11），罗沐言三次都是“我反对把代码生成当作新人替代品”（#4、#10、#13）；其余部分是“还要核实实际影响”“关键条件还没有说清”“不能只凭一个条件下结论”这类不含信息的套话。
+- 根因：每个 profile 只有一条 stance，发言模板都是“套话 + 我{stance}”。
+- 要求：
+  - 每个 profile 增加至少 4 条论据。每条论据是一句具体、能独立成立的观点，角度互不相同（例如适用条件、风险或代价、例子或证据、落地做法），方向与 stance 一致。编程、客服、通用三类话题的全部 profile 都要写；通用 profile 的论据不出现具体行业名词，可以从职业视角出发。
+  - 专家第一次发言用 stance 亮明立场；之后每次使用自己下一条还没用过的论据；论据用完后，针对回应对象最近一条发言的具体内容作答（引用仍遵守 06d 的规则）。
+
+（中略）
+
+### 2. 立场方向：要有补充，也要有共识
+
+（中略）
+
+- 要求：
+  - mock 沿用与真实出价完全相同的方向分类，不另立规则。mock 不能直接调用 prompts 的内部函数时，保持 `mockStanceRelation` 与 `stanceDirection` 的规则一致，并用测试保证两者对同一批标签给出相同的 relation（例如构造出价 Prompt，读取其中的 relation 文本来对照）。
+
+（中略）
+
+## 续派 1（编排者通读首轮三场整场记录之后）
+
+（中略）
+
+## 续派 2（编排者审查续派 1 之后；mock 讨论质量的最后一轮）
+
+（中略）
+
+### F2. 反驳、补充和洞察要与“在议题上站哪一边”一致
+
+（中略）
+
+根因：论据只标了议题，没有标“在这个议题上站哪一边”。方向只按人（stanceTag）分类，可同一个人的论据可能站在议题的另一边（例如 `mockProfiles.ts` 里“有条件支持”的陈澄，论据“新人仍要独立从报错定位原因”站的是偏谨慎的一边）。mock 按人的方向或哈希决定反驳还是补充，洞察又按发言行为生成，于是出现上面的错位。
+
+要求：
+
+1. 每个议题定义两个相反的取向（简短短语，例如“哪些任务可交给助手”：“低风险任务先交给助手 / 基础任务先让新人自己做”），每条论据标注它站在哪个取向（例如字段 `side`）。方向为支持或反对的 profile，4 条论据的取向都与其方向一致；中立、谨慎的 profile 两种取向都要有。需要时改写论据，仍满足 C 节（议题短语）与 C2。
+```
+
+完整原文：[docs/prompts/06e-mock-discussion-flow.md](prompts/06e-mock-discussion-flow.md)。
+
+说明：编排日志记载，首轮交付后编排者逐条通读三场整场记录，把引用截断、问答接不上、客服场没有补充与共识转成每场检查，并新增引擎例外让追问稳定出现；续派 1 执行中因模型额度耗尽中断，新会话按原任务书接手并以快照 `16d238f` 固定进度，续派 2 是 mock 质量的最后一轮，收口于 `80f52f0`。
+
+## 【E2E 阶段】Prompt 09 · Playwright 系统级端到端测试与质量闭环
+
+执行者：luna-worker 子代理（配置为 GPT-6 Luna）；对应提交：`5421a22` fix(server): 洞察立场按座位排序、同毫秒洞察按写入顺序，E2E 增加可复现讨论 ID；`179aca1` test(e2e): Playwright 端到端九个场景与质量闭环。
+
+Prompt 原文摘录：
+
+```text
+> 为什么 E2E 放在最后：单元测试证明“规则对”，E2E 证明“用户看到的对”。演播厅的核心体验（非机械轮流、实时状态、Transcript 不暴露内部事件、实时共识分歧、总结无 JSON、多讨论隔离、区域独立滚动、Key 不出后端）只有在真实浏览器里跑通整条链路才能被证实。Prompt 08 §3 的全栈联调截图也并入本阶段完成（见 08 文件末尾的派发说明补充）。
+
+（中略）
+
+## 2. 场景（每个场景在 `docs/TEST-PLAN.md` 中对应到 AC 编号）
+
+（中略）
+
+8. `discussion-quality.spec.ts`（API 层面，跑完一场后取快照）：
+   - 没有同一专家连续两条发言，且专家发言顺序不是按座位轮转。
+   - 专家发言与主持人插话 ≤ 2 句，开场 ≤ 3 句。
+   - 至少 1 次主持人插话（追问 / 串联 / 点名）；专家发言的 act 至少有 2 种。
+   - 达到轮次上限自然结束时，最后一条正文发言来自专家（主持人不在最后一轮提问后无人回答）。
+   - 抢答额度（ARCHITECTURE §5.B）：act 为 `interrupt` 的正文发言不超过 `max(1, floor(maxTurns / 6))` 条，且没有两条相邻的正文发言都是 `interrupt`。
+   - 总结流式推送：在同一场讨论的 SSE 记录中，act 为 `closing` 的发言有多条 delta，且第一条 delta 早于 `summary.completed`。
+
+（中略）
+
+## 3. 质量闭环
+
+- `npm run test:e2e` 连续运行 2 次，都必须全部通过（真实模型场景除外）。若有偶发失败，修正等待条件，不要加重试。
+- E2E 发现的产品缺陷：在 web 或 server 中修复，并补一个能复现该缺陷的单元或集成回归测试。报告中逐条列出：现象 → 根因 → 修复 → 回归测试。
+- 最后在仓库根目录运行 `npm run typecheck` 和 `npm test`，确认全绿。
+- 用 `E2E_SHOTS_DIR=C:\Users\123\Desktop\mianshiti\_review\e2e` 再跑一次，生成审查截图。
+
+（中略）
+
+## 派发补充（编排者，07 续派 3 与 06e 之后）
+
+（中略）
+
+1. 随机性：E2E 里讨论 ID 每次随机生成，Runner 的 RNG 和 mock 的种子都由它派生，所以每次运行的讨论走向都不同，质量断言必须对任意种子成立。runner 单测已经出现过两次“某些种子下不成立”的偶发失败（洞察更新、专家正文 act 种类），都靠固定种子解决。`discussion-quality` 里“专家发言的 act 至少有 2 种”“结束前出现共识或分歧”这类统计性质，如果只在多数种子下成立，不要靠重试：要么把断言改成规格保证的性质，要么为 E2E 提供确定性（例如服务端读取一个仅供测试、默认关闭的环境变量来固定 mock 与 Runner 的种子），并在报告中说明理由与改动。
+
+（中略）
+
+6. 主持人串联与追问交替（06e 续派 1 的 G 节，ARCHITECTURE §5.D 第 2 步）：专家连续发言 3 条后，如果最近一次 bridge / follow_up 插话是 bridge，就追问上一位专家；否则有 active 分歧时串联。因此：
+   - `discussion-quality` 增加一条只依赖规格、任意种子都成立的断言：按 seq 排列主持人的 bridge 与 follow_up 插话，不会有相邻两次都是 bridge。
+   - E2E 后端的 `MAX_TURNS` 由 8 改为 12（与 06e 的整场验收一致）。8 轮内通常只有一次串联，追问几乎不会出现，截图和质量断言都覆盖不到。改为 12 后抢答额度为 2 次，§2 第 8 条的公式不变。真实模型场景仍用 8 轮。
+```
+
+完整原文：[docs/prompts/09-e2e.md](prompts/09-e2e.md)。
+
+说明：编排日志记载，E2E 用服务端测试种子 `TEST_DISCUSSION_ID_SEED` 取得确定性，发现并修复洞察立场按随机 UUID 排序、同毫秒洞察按随机 id 决胜两个缺陷；默认套件连续 3 次 10 passed / 1 skipped，真实模型场景运行 1 次通过（阵容 8.3s、首条专家发言 12.9s、全场 45.1s）。
 
 ## 【交付】Prompt 10 · README、工作流、Prompt 记录与 PDF
-（第二部分补齐）
+
+执行者：luna-worker 子代理（配置为 GPT-6 Luna）；对应提交：文档与交付（本文所在提交）。
+
+Prompt 原文摘录：
+
+```text
+> 为什么单独做这一步：作业写明“开发文档是重点考察项”。评审者通过 README、规格文档、Prompt 记录和工作流说明来判断工程拆解能力和对 AI 输出的掌控力。所以文档必须真实、可复现，并且与代码一致。
+
+## 0. 开始前
+
+- 仓库根目录 `C:\Users\123\Desktop\mianshiti\ai-panel-studio`。先读 `AGENTS.md` 和编排日志 `journal.md`，再读 `docs/` 下全部文档与 `docs/prompts/` 下全部 Prompt，用 `git log --stat` 了解提交演进。
+- 所有事实（命令、端口、环境变量、默认值、测试数量、提交 hash、遇到的问题）都必须来自代码、命令输出或编排日志。不确定的就去查证；查不到的不要写。
+
+## 1. `README.md`（根目录，中文）
+
+作业要求 README 必须包含：运行指南、环境变量配置、技术选型说明、主要 API 列表、已完成能力与后续改进方向。按以下顺序组织：
+
+1. 项目名与一句话简介；3–5 张截图（大厅、阵容确认、演播厅直播中、演播厅结束后的共识分歧与总结、手机端）。从 `_review\e2e\` 挑选，复制到 `docs/images/`，用英文文件名；图片总大小不超过 3 MB，超出时用 Edge 重新截图为 JPEG（质量 80）。
+2. 已完成能力：对照作业的“功能要求”和“技术要求”逐条列出，每条写清实现方式，以及由哪个测试或 E2E 场景验证。
+
+（中略）
+
+**第二部分 B（09 提交后，resume 第二部分 A 的子代理）**
+
+完成其余内容：README 的待补小节；`docs/TEST-PLAN.md` 与实现对齐（09 写入的 E2E 结果只核对）；PROMPT-LOG 的 06e、09、10 三段；WORKFLOW 的标记；正式 PDF；§6 的全部验证。届时编排者会给出新增的提交与编排日志要点。
+```
+
+完整原文：[docs/prompts/10-docs-delivery.md](prompts/10-docs-delivery.md)。
+
+说明：编排日志记载，Prompt 10 拆成两部分：A 与 06e 并行完成不依赖最终代码的文档对齐与 PROMPT-LOG 补段，B 在 09 提交后补齐截图、E2E 小节、TEST-PLAN、三段占位、正式 PDF 与全部验证；因第一部分子代理会话被额度切换，第二部分改派新的 luna-worker 子代理完成 A、B 两步。

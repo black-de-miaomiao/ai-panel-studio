@@ -42,7 +42,7 @@ flowchart LR
 | `web/src/state` | 当前讨论、快照、实时事件与页面状态管理。 |
 | `web/src/components` | 嘉宾卡片、专家状态小窗、Transcript、洞察等可复用视图。 |
 | `web/src/pages` | 首页大厅、阵容确认、演播厅与回看页面。 |
-| `e2e/`（规划目录） | Playwright 系统级流程测试计划；在当前实现快照中目录与配置尚未建立，待第二部分 B 补齐。 |
+| `e2e/` | Playwright 端到端测试（九类场景 + 默认跳过的真实模型场景）；根目录有 `playwright.config.ts` 与 `playwright.real-llm.config.ts`。 |
 
 前端在浏览器中只持有 API 响应和公开讨论内容，不加载后端密钥，不访问模型服务地址。
 
@@ -391,7 +391,7 @@ stateDiagram-v2
 | Monorepo | npm workspaces 目前只有 `shared/`（`@aps/shared`）、`server/`（`@aps/server`）、`web/`（`@aps/web`）。 |
 | 后端 | Node.js ≥ 22.13、TypeScript、Express 5、zod、`node:sqlite` 的 `DatabaseSync`、SSE。默认端口 `8787`。 |
 | 前端 | React 19、Vite、TypeScript、Tailwind CSS v4、React Router 7、lucide-react。开发端口 `5173`；`/api` 代理到后端，同源访问无需 CORS。 |
-| 测试 | Vitest（单元/集成）、supertest；根包已声明 Playwright 依赖和 `test:e2e` 脚本，但 `playwright.config.*` 与 `e2e/` 尚未建立（第二部分 B 补齐）。 |
+| 测试 | Vitest（单元/集成）、supertest；Playwright（`channel: 'msedge'`）E2E：根 `playwright.config.ts` 以 desktop / fhd / ultrawide / mobile 四个 project 运行 `e2e/`，默认 mock 不依赖网络；真实模型场景由 `playwright.real-llm.config.ts` 单独驱动（`npm run test:e2e:real`）。 |
 | 持久化 | SQLite；数据库列 `snake_case`，API 与共享契约 `camelCase`。 |
 
 ### 6.2 网关契约与路由
