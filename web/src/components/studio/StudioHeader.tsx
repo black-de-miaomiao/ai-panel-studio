@@ -81,6 +81,7 @@ export function StudioHeader({
             pulse={discussion.status === 'live'}
             tone={statusTone(discussion.status)}
             className="studio-header__status"
+            testId="studio-status"
           >
             {discussion.status === 'live' ? 'LIVE' : STATUS_LABELS[discussion.status]}
           </Badge>

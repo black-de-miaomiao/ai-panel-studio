@@ -15,13 +15,15 @@ interface BadgeProps {
   children: ReactNode;
   className?: string;
   pulse?: boolean;
+  testId?: string;
 }
 
 export function Badge({
   tone = 'neutral',
   children,
   className,
-  pulse = false
+  pulse = false,
+  testId
 }: BadgeProps) {
   return (
     <span
@@ -31,6 +33,7 @@ export function Badge({
         pulse && 'badge--pulse',
         className
       )}
+      data-testid={testId}
     >
       {pulse ? <span className="badge__pulse-dot" aria-hidden="true" /> : null}
       {children}

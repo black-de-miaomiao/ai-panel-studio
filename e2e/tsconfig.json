@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "noEmit": true,
+    "moduleDetection": "force"
+  },
+  "include": ["**/*.ts", "../playwright.config.ts", "../playwright.real-llm.config.ts"]
+}

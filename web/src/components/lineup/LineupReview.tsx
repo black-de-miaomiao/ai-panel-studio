@@ -33,7 +33,7 @@ export function LineupReview({
     .sort((left, right) => left.seat - right.seat);
 
   return (
-    <section className="lineup-review">
+    <section className="lineup-review" data-testid="lineup-review">
       <div className="lineup-review__heading">
         <div>
           <button className="back-link" onClick={onBack} type="button">

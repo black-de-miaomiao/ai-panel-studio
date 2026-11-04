@@ -25,7 +25,7 @@ export function DiscussionCard({ discussion }: DiscussionCardProps) {
   const isReplay = discussion.status === 'ended';
   const action = isReplay ? '观看回放' : '进入演播厅';
   return (
-    <article className="discussion-card">
+    <article className="discussion-card" data-testid="discussion-card">
       <div className="discussion-card__topline">
         <Badge
           pulse={discussion.status === 'live'}

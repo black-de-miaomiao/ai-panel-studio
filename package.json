@@ -13,9 +13,11 @@
   ],
   "scripts": {
     "dev": "concurrently -k -n server,web -c cyan,magenta \"npm run dev -w @aps/server\" \"npm run dev -w @aps/web\"",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present && npm run typecheck:e2e",
+    "typecheck:e2e": "tsc -p e2e/tsconfig.json",
     "test": "npm run test --workspaces --if-present",
     "test:e2e": "playwright test",
+    "test:e2e:real": "playwright test -c playwright.real-llm.config.ts",
     "build": "npm run build -w @aps/web",
     "db:init": "npm run db:init -w @aps/server",
     "db:reset": "npm run db:reset -w @aps/server"

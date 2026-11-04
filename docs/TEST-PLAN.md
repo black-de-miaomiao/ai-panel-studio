@@ -76,18 +76,67 @@
 - OpenAI 兼容提供商只接受 fake `fetch`：构造成功 JSON、含 `reasoning_content` 的消息、跨 chunk SSE、429 后恢复、连续 5xx 与 abort 超时。测试断言只检验错误行为和密钥不泄漏，不发出真实网络请求。
 - REST/SSE 集成测试使用内存 SQLite 与随机本地 HTTP 端口；事件补发数据优先使用种子记录的结构性性质，不依赖具体种子发言文本或发言条数。
 
-## 5. E2E 场景清单（后续 E2E 阶段实现）
+## 5. E2E 场景清单（Playwright，`npm run test:e2e`）
 
-- [ ] 大厅显示种子讨论列表，并按状态分组、显示暂停状态。
-- [ ] 新建话题 → 生成阵容 → 用户确认 → 进入直播。
-- [ ] 专家小窗能反映待机、准备发言、发言中及公开关注点变化。
-- [ ] Transcript 只包含完成发言，不包含举手等内部事件。
-- [ ] 讨论结束前出现共识与分歧更新。
-- [ ] 结束后出现自然语言主持人总结；页面不展示 JSON。
-- [ ] 同时运行的两场讨论相互隔离。
-- [ ] 超宽、桌面、窄屏三档视口下页面整体不滚动，各内容区域可独立滚动。
-- [ ] 前端资源和 API 响应均不包含配置的 API Key。
-- [ ] 暂停当前发言后停止推进，继续后恢复讨论。
+- [x] 大厅显示种子讨论列表，并按状态分组、显示暂停状态。
+- [x] 新建话题 → 生成阵容 → 用户确认 → 进入直播。
+- [x] 专家小窗能反映待机、准备发言、发言中及公开关注点变化。
+- [x] Transcript 只包含完成发言，不包含举手等内部事件。
+- [x] 讨论结束前出现共识与分歧更新。
+- [x] 结束后出现自然语言主持人总结；页面不展示 JSON。
+- [x] 同时运行的两场讨论相互隔离。
+- [x] 超宽、桌面、窄屏三档视口下页面整体不滚动，各内容区域可独立滚动。
+- [x] 前端资源和 API 响应均不包含配置的 API Key。
+- [x] 暂停当前发言后停止推进，继续后恢复讨论。
+
+## 6. E2E 实现与运行结果（Wave6）
+
+### 6.1 基础设施
+
+- 根 `playwright.config.ts`：`testDir: 'e2e'`，`timeout` 90s、`expect.timeout` 15s、`retries: 0`、`workers: 1`，reporter `list` + `html(open: 'never')`，`trace: 'retain-on-failure'`、`screenshot: 'only-on-failure'`。
+- 四个 project（均 `channel: 'msedge'`，不下载浏览器）：`desktop` 1440×900、`fhd` 1920×1080、`ultrawide` 2560×1080、`mobile` 390×844（`isMobile`、`hasTouch`、`deviceScaleFactor: 3`）。功能场景只在 `desktop` 跑，`layout.spec.ts` 四个 project 都跑；`real-llm.spec.ts` 默认 `testIgnore`，由 `playwright.real-llm.config.ts` 单独驱动（`npm run test:e2e:real`）。
+- `webServer` 两个进程（端口避开开发默认端口）：后端 `npm run start -w @aps/server` 监听 8790（环境变量 `LLM_PROVIDER=mock`、`LLM_API_KEY=sk-test-not-a-real-key`、`DATABASE_PATH` 为系统临时目录唯一文件、`MAX_TURNS=12`、`PACING_MS=150`、`MOCK_LATENCY_MS=40`、`MOCK_STREAM_DELAY_MS=20`、`TEST_DISCUSSION_ID_SEED=e2e-a`）；前端先 `vite build` 再 `vite preview` 监听 5180（`API_PROXY_TARGET=http://127.0.0.1:8790`）。均以健康检查 URL 判就绪，`reuseExistingServer: false`。
+- 进程环境变量优先于 `server/.env`（`process.loadEnvFile` 不覆盖已存在变量，已实测确认），因此 E2E 永远跑在 mock 提供商上，不会加载真实 Key。
+- `e2e/tsconfig.json` + 根 `typecheck:e2e`；根 `typecheck` 已同时覆盖 workspaces 与 e2e。
+- 截图：设置 `E2E_SHOTS_DIR` 时按 `{场景}-{project}.png` 保存；未设置时不保存。
+
+### 6.2 场景 → AC 映射
+
+| 文件 | 覆盖 |
+|---|---|
+| `lobby.spec.ts` | AC-F1-1、AC-F1-2、AC-F6-2、AC-F6-3、AC-F7-1、AC-F7-2 |
+| `create-and-live.spec.ts` | AC-F1-4、AC-F2-1、AC-F2-3、AC-F2-4、AC-F2-6、AC-F2-7、AC-F3-1、AC-F3-3、AC-F4-1、AC-F5-1、AC-F6-1、AC-F6-2、AC-F7-1、AC-F7-2、AC-F8-1、AC-F8-2 |
+| `controls.spec.ts` | AC-F3-4、AC-F3-5 |
+| `isolation.spec.ts` | AC-F1-3、AC-F3-1、AC-F5-1、AC-F6-1 |
+| `realtime.spec.ts` | AC-F1-3、AC-F6-3（SSE 断线重连补发） |
+| `layout.spec.ts` | UI-DESIGN 响应式断点（页面不滚动、区域独立滚动、窄屏 Tab） |
+| `security.spec.ts` | AC-F4-3（假 Key / `reasoning_content` / 服务商地址不出现在任何响应体） |
+| `discussion-quality.spec.ts` | ARCHITECTURE §5.B–D（非轮转、句子上限、主持人插话、抢答额度、串联/追问交替、总结流式推送） |
+| `real-llm.spec.ts` | 真实模型主流程证据（默认跳过） |
+
+### 6.3 运行结果
+
+- `npm run test:e2e` 连续 3 次全部通过：每次 **10 passed / 1 skipped**（skipped 为默认跳过的真实模型场景），耗时分别约 112s / 110s / 111s。
+- `E2E_SHOTS_DIR=C:\Users\123\Desktop\mianshiti\_review\e2e` 又跑一次全部通过，生成 16 张审查截图（含真实模型 3 张）。
+- 真实模型场景（`E2E_REAL_LLM=1 npm run test:e2e:real`，后端不设 `LLM_PROVIDER`/`LLM_API_KEY`、由服务自己加载 `server/.env`，`MAX_TURNS=8`）运行 1 次通过：阵容生成 8.3s、首条专家发言 12.9s、全场 45.1s，留存阵容确认 / 直播中 / 结束三张截图。
+
+### 6.4 种子问题的处理（可复现讨论）
+
+统计性质量断言（专家 act 种类、非座位轮转、结束前出现洞察等）对任意随机种子并不都成立。E2E 采用**服务端测试种子**取得确定性：新增仅测试读取、默认关闭的环境变量 `TEST_DISCUSSION_ID_SEED`（见 `server/src/core/deterministicIds.ts`），设置后新建讨论使用由 `(种子, 话题, 序号)` 派生的稳定 UUID。讨论 ID 是 mock 输出与 Runner RNG 的唯一种子来源，固定它即复现整场讨论。E2E 使用种子 `e2e-a`；同一 seed + 话题的讨论经脚本两次全量比对（发言、洞察、总结逐条一致）确认可复现。规格保证的性质（无连续同一发言人、句子上限、抢答额度、串联/追问交替、末条正文来自专家等）仍按规格断言。
+
+### 6.5 E2E 发现并修复的缺陷
+
+1. **洞察立场顺序随机**：现象——同一场共识/分歧的专家立场展示顺序在两次相同运行间不一致。根因——`insights` 仓库读取立场时 `ORDER BY participant_id`，而 participant_id 是随机 UUID。修复——改为按座位（`p.seat`）排序，展示顺序稳定且符合席位语义。回归测试——`server/src/db/repositories/repositories.test.ts` 新增用例（专家 ID 与座位反向时仍按座位返回）。
+2. **同毫秒洞察的 C/D 编号与 ref 映射不稳定**：现象——固定种子后仍有一处洞察内容在重复运行间漂移。根因——`listByDiscussion` 对 `created_at` 相同的洞察按随机 `id` 决胜；且 Runner 构建 ref 映射用 `(createdAt, id)` 排序，与提示词 `formatInsightsForPrompt` 的 `(createdAt, 数组下标)` 编号可能错位，导致洞察补丁引用错条目。修复——读取改为 `created_at ASC, rowid ASC`（写入顺序）；Runner 与提示词共用 `insightsInCreatedOrder`（`server/src/core/context.ts`）。回归测试——`repositories.test.ts`（同毫秒洞察保持写入顺序）与 `context.test.ts`（编号与数组顺序一致）。
+
+### 6.6 新增 `data-testid`
+
+`studio-status`（演播厅状态徽标）、`discussion-card`（大厅讨论卡片）、`lineup-review`（阵容确认区）。其余定位沿用既有 role/aria/class（如 `role="log"` 的实录区、`.expert-window[data-state]`、`.transcript-item[data-seq]`、Tabs 的 `data-tab-key`）。
+
+### 6.7 遗留问题
+
+-  Chromium 的 `context.setOffline(true)` 不会断开已建立的 SSE 连接（实测：离线期间事件仍持续到达、徽标不变）。`realtime.spec.ts` 因此用 `page.route` 拒绝新的 stream 请求来“拔网线”，`setOffline` 同时让整个上下文断网，恢复时两者一起解除；已在用例注释中说明。
+-  mock 的追问回答（follow-up answer）有的句子不带句末标点（如“可以分地点记录调整次数与额外投入”）；陈述引导偶用议题问句作前缀（如“就效果应该如何衡量而言：”）。仅记录现象，未改 `server/src/llm/mock*`。
 
 ## 6. 已确认
 
