@@ -698,6 +698,22 @@ async function scheduleNoBidFallback(
   results: readonly BidResult[],
   turnIndex: number
 ) {
+  const lastIntervention = [...state.utterances]
+    .reverse()
+    .find((utterance) => {
+      const participant = state.participants.find(
+        (candidate) => candidate.id === utterance.participantId
+      );
+      return (
+        participant?.role === 'host' &&
+        (utterance.act === 'bridge' || utterance.act === 'follow_up')
+      );
+    });
+  const lastInterventionAct =
+    lastIntervention?.act === 'bridge' ||
+    lastIntervention?.act === 'follow_up'
+      ? lastIntervention.act
+      : null;
   const hostContext: HostPolicyContext = {
     participants: state.participants.map(
       ({ id, role, seat, speakCount }): HostPolicyParticipant => ({
@@ -708,6 +724,7 @@ async function scheduleNoBidFallback(
       })
     ),
     lastSpeakerId: state.lastSpeakerId,
+    lastInterventionAct,
     expertTurnsSinceHost: state.expertTurnsSinceHost,
     noBidders: true,
     turnCount: state.turnCount,
