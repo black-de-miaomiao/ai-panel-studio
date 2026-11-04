@@ -21,7 +21,7 @@
 
 ## 已完成能力与验证
 
-对照作业的「功能要求」与「技术要求」逐条列出；每条的实现由对应的单元 / 集成测试或 Playwright E2E 场景验证。当前用例数：shared 11 passed；server 228 passed / 1 skipped（跳过的为 `APS_MOCK_FLOW_RANDOM_RUNS` 门控的随机 ID 用例）；web 55 passed；E2E 10 passed / 1 skipped（默认跳过的真实模型场景）。
+对照作业的「功能要求」与「技术要求」逐条列出；每条的实现由对应的单元 / 集成测试或 Playwright E2E 场景验证。当前用例数：shared 11 passed；server 233 passed / 1 skipped（跳过的为 `APS_MOCK_FLOW_RANDOM_RUNS` 门控的随机 ID 用例）；web 55 passed；E2E 10 passed / 1 skipped（默认跳过的真实模型场景）。
 
 ### 功能要求
 
@@ -72,7 +72,7 @@ npm run dev
 测试命令：
 
 ```powershell
-npm test                            # 单元与集成测试（shared 11、server 228 passed / 1 skipped、web 55）
+npm test                            # 单元与集成测试（shared 11、server 233 passed / 1 skipped、web 55）
 npm run typecheck                   # 类型检查（shared / server / web / e2e）
 npm run test:e2e                    # Playwright E2E：10 passed / 1 skipped（真实模型场景默认跳过）
 E2E_REAL_LLM=1 npm run test:e2e:real   # 可选：真实模型场景（读取 server/.env 中的 Key，只跑 1 次留证）
@@ -257,9 +257,8 @@ flowchart LR
 
 ### 已知限制
 
-- 真实 DeepSeek run 5、run 6 均未产生共识条目；run 6 中专家补充了前一发言的“返工成本”前提，但洞察模型仍漏掉了这条局部共识。
-- run 6 的两次主持人串联复用了同一句追问“你怎么回应启航这个说法？”。
-- run 6 第 10、12 条专家反驳论点相近。以上观察来自有限的 run 4–6 冒烟，不能据此推断长期表现；详见 [运行时 Prompt 与冒烟记录](docs/RUNTIME-PROMPTS.md)。
+- 真实 DeepSeek 的共识召回与主持问法曾不稳定：run 5、run 6 全场 0 条共识（run 6 漏记了专家承接前一发言前提的局部共识），run 6 两次主持人串联复用同一句追问。改进轮（run 8–12）在洞察 Prompt 中明确“承接前提必须记共识”、在主持人 Prompt 中增加提问去重后，run 10–12 每场共识 1–4 条（evidence 均为真实 seq）且提问两两不同；但 fast 档召回仍是概率性的，少量样本不能保证每场必现。详见 [运行时 Prompt 与冒烟记录](docs/RUNTIME-PROMPTS.md)。
+- run 6 第 10、12 条专家反驳论点相近（发言 Prompt 层未处理）。
 - mock 的追问回答有的句子句末不带标点（如“可以分地点记录调整次数与额外投入”）；陈述引导偶用议题问句作前缀（如“就效果应该如何衡量而言：”）。E2E 阶段只记录现象，未改 mock。
 - Chromium 的 `context.setOffline(true)` 不会断开已建立的 SSE 连接；`realtime.spec.ts` 因此用 `page.route` 拒绝新的 stream 请求来模拟拔网线，`setOffline` 同时让整个上下文断网，恢复时两者一起解除（用例注释已说明）。
 - 12 轮、主持间隔 3 时，mock 场次的主持插话序列确定为「5 次串联 → 7 次点名 → 11 次追问」，这是主持人策略的确定结果。
