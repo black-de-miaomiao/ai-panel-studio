@@ -294,6 +294,18 @@ function inspectFlow(scene: FlowScene): Record<string, boolean> {
   );
   mark('stance-directions-match-argument-sides', stanceSideDirectionValid);
   mark(
+    'every-issue-has-both-sides-in-profiles',
+    issues.every(({ issue, sides }) =>
+      sides.every((side) =>
+        profiles.some((profile) =>
+          profile.arguments.some(
+            (argument) => argument.issue === issue && argument.side === side
+          )
+        )
+      )
+    )
+  );
+  mark(
     'general-profile-and-output-stay-topic-neutral',
     sceneGroup(scene.topic) !== 'general' ||
       (() => {
@@ -333,12 +345,30 @@ function inspectFlow(scene: FlowScene): Record<string, boolean> {
   const opening = scene.utterances.find(({ act }) => act === 'opening');
   const closing = scene.utterances.find(({ act }) => act === 'closing');
   mark(
-    'opening-quotes-original-topic-and-closing-differs',
+    'opening-quotes-topic-and-differs-from-summary',
     Boolean(
       opening &&
         closing &&
         opening.content.includes(`“${scene.topic}”`) &&
+        firstSentence(opening.content) !== firstSentence(summary) &&
         firstSentence(opening.content) !== firstSentence(closing.content)
+    )
+  );
+  mark(
+    'opening-names-all-guests-without-preempting',
+    Boolean(
+      opening &&
+        experts.every(({ name, profession }) => {
+          const escapedName = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+          return (
+            opening.content.includes(name) &&
+            opening.content.includes(profession) &&
+            !new RegExp(
+              `(?:先请|先由|先让)${escapedName}|${escapedName}(?:先从|先说|先谈|先发言)`,
+              'u'
+            ).test(opening.content)
+          );
+        })
     )
   );
   const hostOutputs = scene.utterances.filter(
@@ -350,12 +380,57 @@ function inspectFlow(scene: FlowScene): Record<string, boolean> {
       ({ content }) => !/吗[。，；]/u.test(content) && !content.includes('提到“')
     ) && outputs.every((value) => !value.includes('提到“'))
   );
+  mark(
+    'objection-phrase-appears-at-most-once-per-scene',
+    outputs.reduce((total, value) => total + value.split('有异议').length - 1, 0) <= 1
+  );
+  mark(
+    'expert-utterances-never-contain-full-topic',
+    expertBody.every(({ content }) => !content.includes(scene.topic))
+  );
+  mark(
+    'outputs-have-cjk-latin-spacing',
+    outputs.every(
+      (value) =>
+        !/[\u4e00-\u9fff][A-Za-z0-9]|[A-Za-z0-9][\u4e00-\u9fff]/u.test(value)
+    )
+  );
+  const hostQuestionClauses = hostOutputs
+    .flatMap(({ content }) => content.match(/[^。！？!?]*[？?]/gu) ?? [])
+    .map((question) => question.trim());
+  mark(
+    'host-question-clauses-are-distinct',
+    new Set(hostQuestionClauses).size === hostQuestionClauses.length
+  );
+  const interventionActs = hostOutputs
+    .filter(({ act }) => act === 'bridge' || act === 'follow_up')
+    .map(({ act }) => act);
+  mark(
+    'host-interventions-never-repeat-bridge-twice',
+    interventionActs.every((act, index) => index === 0 || !(act === 'bridge' && interventionActs[index - 1] === 'bridge'))
+  );
+  mark(
+    'expert-acts-include-both-supplement-and-rebut',
+    (() => {
+      const acts = new Set(expertBody.map(({ act }) => act));
+      return acts.has('supplement') && acts.has('rebut');
+    })()
+  );
+  mark(
+    'interrupt-never-appears-twice-in-a-row',
+    expertBody.every(
+      (utterance, index) =>
+        utterance.act !== 'interrupt' ||
+        index === 0 ||
+        expertBody[index - 1]?.act !== 'interrupt'
+    )
+  );
   const invalidGeneratedQuotes = scene.utterances
     .filter(({ act }) => act !== 'closing')
     .flatMap((utterance) =>
       [...utterance.content.matchAll(/“([^”]+)”/gu)].flatMap((match) => {
         const quote = match[1] ?? '';
-        if (quote === scene.topic) {
+        if (quote === scene.topic || issues.some(({ issue }) => issue === quote)) {
           return [];
         }
         const sourceParticipant = utterance.replyToParticipantId
@@ -386,7 +461,7 @@ function inspectFlow(scene: FlowScene): Record<string, boolean> {
   const invalidSummaryQuotes = [...summary.matchAll(/“([^”]+)”/gu)].flatMap(
     (match) => {
       const quote = match[1] ?? '';
-      if (quote === scene.topic) {
+      if (quote === scene.topic || issues.some(({ issue }) => issue === quote)) {
         return [];
       }
       const isValid = experts.some((participant) => {
@@ -701,36 +776,109 @@ function inspectFlow(scene: FlowScene): Record<string, boolean> {
     .split(/\r?\n\s*\r?\n/u)
     .map((paragraph) => paragraph.trim())
     .filter(Boolean);
-  const summaryIssueChecks = issues.every((issue) => {
-    const block = paragraphs[1]
-      ?.split('。')
-      .find((sentence) => sentence.startsWith(`${issue.issue}：`));
-    if (!block) {
+  const spokenExperts = experts.filter(
+    (participant) => byParticipant(participant.id).length > 0
+  );
+  const positionVerbs = [
+    '支持',
+    '主张',
+    '反对',
+    '担心',
+    '要求',
+    '强调',
+    '认为',
+    '认可',
+    '赞同',
+    '赞成',
+    '警惕',
+    '质疑',
+    '保留',
+    '倾向'
+  ];
+  const paragraphOne = paragraphs[0] ?? '';
+  const paragraphOneAfterTopic = paragraphOne
+    .split(/[。！？!?]/u)
+    .slice(1)
+    .join('。');
+  mark(
+    'summary-paragraph-one-lists-spoken-experts-with-capped-verbs',
+    paragraphs.length >= 3 &&
+      paragraphs.length <= 4 &&
+      paragraphOne.startsWith(`今天的话题是“${scene.topic}”。`) &&
+      spokenExperts.length >= 2 &&
+      spokenExperts.every(({ name }) => paragraphOne.includes(name)) &&
+      experts
+        .filter((participant) => byParticipant(participant.id).length === 0)
+        .every(({ name }) => !paragraphOne.includes(name)) &&
+      positionVerbs.every(
+        (verb) => paragraphOneAfterTopic.split(verb).length - 1 <= 2
+      ) &&
+      !/代表性论据|实际判断是|有限共识/u.test(summary) &&
+      summary.split('看法不同').length - 1 <= 1
+  );
+  const divergenceBlocks = (paragraphs[1] ?? '')
+    .split('。')
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length > 0 && /^(?:分歧主要在|在)“/.test(sentence));
+  const spokenClaimFor = (participant: Participant, claim: string) =>
+    byParticipant(participant.id).some(({ content }) => content.includes(claim));
+  const summaryBlocksValid = divergenceBlocks.every((block) => {
+    const issue = issues.find(({ issue: value }) => block.includes(`“${value}”`));
+    if (!issue) {
       return false;
     }
-    const claims = experts.flatMap((participant) => {
-      const profile = profileFor(participant, scene.topic);
-      const escapedName = participant.name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-      const claimPattern = new RegExp(`${escapedName}认为“([^”]+)”`, 'gu');
-      return [...block.matchAll(claimPattern)].flatMap((match) => {
-        const claim = match[1] ?? '';
+    const quotedClaims = [...block.matchAll(/“([^”]+)”/gu)]
+      .map((match) => match[1] ?? '')
+      .filter((quote) => quote !== issue.issue);
+    const namedExperts = experts.filter(({ name }) => block.includes(name));
+    if (quotedClaims.length !== 2 || namedExperts.length !== 2) {
+      return false;
+    }
+    const sides = new Set(
+      namedExperts.flatMap((participant) => {
+        const profile = profileFor(participant, scene.topic);
         const argument = profile?.arguments.find(
           (candidate) =>
-            candidate.issue === issue.issue && candidate.claim === claim
+            candidate.issue === issue.issue &&
+            quotedClaims.includes(candidate.claim) &&
+            spokenClaimFor(participant, candidate.claim)
         );
-        const spoken = byParticipant(participant.id).some(({ content }) =>
-          content.includes(claim)
-        );
-        return argument && spoken ? [{ participant, side: argument.side }] : [];
-      });
-    });
+        return argument ? [argument.side] : [];
+      })
+    );
     return (
-      claims.length === 2 &&
-      new Set(claims.map(({ participant }) => participant.id)).size === 2 &&
-      new Set(claims.map(({ side }) => side)).size === 2 &&
-      experts.filter(({ name }) => block.includes(name)).length <= 2
+      sides.size === 2 &&
+      scene.insights.some(
+        (insight) =>
+          insight.kind === 'divergence' &&
+          insight.content.startsWith(`${issue.issue}：`)
+      )
     );
   });
+  mark(
+    'summary-paragraph-two-covers-at-most-two-opposite-claim-issues',
+    divergenceBlocks.length <= 2 &&
+      (divergenceInsights.length === 0 || divergenceBlocks.length > 0) &&
+      summaryBlocksValid
+  );
+  const consensusInsightsForSummary = scene.insights.filter(
+    ({ kind }) => kind === 'consensus'
+  );
+  const paragraphThree = paragraphs[2] ?? '';
+  mark(
+    'summary-paragraph-three-covers-consensus-or-open-question',
+    consensusInsightsForSummary.length === 0
+      ? !/共识|都同意|一致认为/u.test(paragraphThree) &&
+        issues.some(({ issue }) => paragraphThree.includes(issue))
+      : consensusInsightsForSummary.some((insight) =>
+          paragraphThree.includes(insight.content)
+        ) && !/[“”]/u.test(paragraphThree)
+  );
+  const lastParagraph = paragraphs.at(-1) ?? '';
+  mark(
+    'summary-closes-with-thanks-without-late-questions',
+    lastParagraph.includes('感谢') && !/[？?]/u.test(lastParagraph)
+  );
   const summaryClauses = summary
     .split(/[，。；：！？]/u)
     .map((clause) => clause.trim())
@@ -740,13 +888,6 @@ function inspectFlow(scene: FlowScene): Record<string, boolean> {
   const summaryHasNoDoubleColon = summary
     .split(/[。！？!?]/u)
     .every((sentence) => (sentence.match(/：/gu) ?? []).length <= 1);
-  mark(
-    'summary-paragraph-two-uses-opposite-spoken-claims-per-issue',
-    paragraphs.length === 2 &&
-      paragraphs[0] !== paragraphs[1] &&
-      Boolean(paragraphs[0]?.startsWith(`今天的话题是“${scene.topic}”。`)) &&
-      summaryIssueChecks
-  );
   mark(
     'summary-clauses-unique-and-single-colon',
     summaryHasNoDuplicateClauses && summaryHasNoDoubleColon

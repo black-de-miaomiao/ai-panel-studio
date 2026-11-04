@@ -765,16 +765,16 @@ describe('createMockProvider', () => {
         }
       }
     }
+    const disagreementPattern =
+      /不同意|不赞同|不赞成|不认同|难以认同|不敢苟同|不一样|倒不这么看|不这么看|有不同看法|分情况看|相反|反对|反例|不能认同|不充分|有异议/u;
     for (const text of rebutOutputs) {
-      expect(text).toMatch(
-        /不同意|不赞同|不赞成|不认同|我反对|反对|不能认同|不充分|有异议/u
-      );
+      expect(text).toMatch(disagreementPattern);
     }
     expect(interruptOutputs).toHaveLength(stanceVariants.length * 6);
     for (const text of interruptOutputs) {
       expect(text).toContain(interruptTargetProfile.name);
       expect(text).toContain(`“${interruptTargetProfile.stanceClaim}”`);
-      expect(text).toMatch(/不同意|不赞同|不赞成|不认同|我反对|反对|不能认同|不充分|有异议/u);
+      expect(text).toMatch(disagreementPattern);
     }
     for (const stance of stanceVariants) {
       for (const text of outputs.filter((output) => output.includes(stance))) {
@@ -899,7 +899,8 @@ describe('createMockProvider', () => {
     }).complete(request('utterance', prompt.context, 'unclaimed-reference'));
 
     expect(result.text).not.toMatch(/“[^”]+”/u);
-    expect(result.text).toContain(`${profile.name}刚才的判断`);
+    expect(result.text).toContain(profile.name);
+    expect(result.text).not.toContain('刚才说');
   });
 
   it('不同 act 的六个发言模板在同一讨论内轮完前不重复', async () => {
@@ -1582,7 +1583,7 @@ describe('createMockProvider', () => {
     expect(result.text).not.toMatch(/新人|岗位|编程|代码|效率收益/u);
   });
 
-  it('总结第二段按每个议题呈现两侧真实主张且不归属未发言嘉宾', async () => {
+  it('总结第一段列已发言专家主张、第二段按分歧议题写双方 claim', async () => {
     const provider = createMockProvider({
       latencyMs: 0,
       streamDelayMs: 0
@@ -1602,6 +1603,25 @@ describe('createMockProvider', () => {
       { alias: 'E2', ...secondProfile },
       { alias: 'E3', ...unusedProfile }
     ];
+    const issue = MOCK_ISSUE_GROUPS.general[0]!;
+    const divergenceInsight = makeTestInsight({
+      id: 'summary-divergence',
+      discussionId: 'summary-context',
+      kind: 'divergence',
+      content: `${issue.issue}：${issue.sides.join('；')}`,
+      stances: [
+        {
+          participantId: fuelAliasMap.E1,
+          position: firstProfile.arguments[0]!.position
+        },
+        {
+          participantId: fuelAliasMap.E2,
+          position: secondProfile.arguments[0]!.position
+        }
+      ],
+      evidenceSeqs: [2, 3],
+      updatedAtSeq: 3
+    });
     const actualUtterances = [
       utteranceEntry(1, 'H', 'opening', null, `今天讨论“${fuelTopic}”。`),
       utteranceEntry(2, 'E1', 'statement', null, firstProfile.arguments[0]!.claim),
@@ -1616,7 +1636,7 @@ describe('createMockProvider', () => {
       })
       .join('\n');
     const prompt = buildSummaryPrompt({
-      ...fuelDiscussion(transcript, []),
+      ...fuelDiscussion(transcript, [divergenceInsight]),
       roster: summaryRoster
     });
     const result = await provider.complete(
@@ -1628,20 +1648,27 @@ describe('createMockProvider', () => {
 
     expect(result.text).toContain('城市是否应该全面禁止燃油车');
     expect(result.text).toContain(`“${fuelTopic}”`);
-    expect(paragraphs).toHaveLength(2);
-    expect(paragraphs[1]).toContain(
-      `沈清和认为“${firstProfile.arguments[0]!.claim}”`
+    expect(paragraphs).toHaveLength(4);
+    expect(paragraphs[0]).toContain(
+      `沈清和${firstProfile.arguments[0]!.position}`
     );
+    expect(paragraphs[0]).toContain(
+      `林予川${secondProfile.arguments[0]!.position}`
+    );
+    expect(paragraphs[0]).not.toContain('周景行');
     expect(paragraphs[1]).toContain(
-      `林予川认为“${secondProfile.arguments[0]!.claim}”`
+      `分歧主要在“${issue.issue}”上：沈清和认为“${firstProfile.arguments[0]!.claim}”，林予川则认为“${secondProfile.arguments[0]!.claim}”`
     );
     expect(paragraphs[1]).not.toContain('周景行');
-    expect(paragraphs[1]).not.toContain(paragraphs[0]!);
-    expect(paragraphs[1]).not.toMatch(/[^。！？]*：[^。！？]*：/u);
+    expect(paragraphs[2]).not.toContain('共识');
+    expect(paragraphs[2]).toMatch(/[？?]$/u);
+    expect(paragraphs[3]).toContain('感谢');
+    expect(paragraphs[3]).not.toMatch(/[？?]/u);
     expect(result.text).not.toMatch(/…|[CD]\d/u);
+    expect(result.text).not.toMatch(/[^。！？]*：[^。！？]*：/u);
   });
 
-  it('没有共识洞察时总结仍是两段实际主张且不声称形成共识', async () => {
+  it('没有洞察时总结据实只写主张与开放问题且不声称形成共识', async () => {
     const provider = createMockProvider({
       latencyMs: 0,
       streamDelayMs: 0
@@ -1672,12 +1699,19 @@ describe('createMockProvider', () => {
       .split(/\r?\n\s*\r?\n/u)
       .filter((paragraph) => paragraph.trim());
 
-    expect(paragraphs).toHaveLength(2);
+    expect(paragraphs).toHaveLength(3);
     expect(result.text).not.toContain('共识');
     expect(result.text).toContain(`“${fuelTopic}”`);
-    expect(paragraphs[1]).toContain(firstProfile.arguments[0]!.claim);
-    expect(paragraphs[1]).toContain(secondProfile.arguments[0]!.claim);
-    expect(paragraphs[1]).not.toContain(paragraphs[0]!);
+    expect(paragraphs[0]).toContain(
+      `沈清和${firstProfile.arguments[0]!.position}`
+    );
+    expect(paragraphs[0]).toContain(
+      `林予川${secondProfile.arguments[0]!.position}`
+    );
+    expect(paragraphs[1]).not.toContain(firstProfile.arguments[0]!.claim);
+    expect(paragraphs[1]).toMatch(/[？?]$/u);
+    expect(paragraphs[2]).toContain('感谢');
+    expect(paragraphs[2]).not.toMatch(/[？?]/u);
     expect(result.text).not.toMatch(/…|[CD]\d/u);
     expect(result.text.trimStart()).not.toMatch(/^(?:\{|\[)/u);
   });
@@ -1918,11 +1952,16 @@ describe('createMockProvider', () => {
       outputs.push(summary.text);
 
       const sourceUtterances = history.map(({ content }) => content);
+      const issuePhrases = new Set(
+        Object.values(MOCK_ISSUE_GROUPS)
+          .flat()
+          .map(({ issue }) => issue)
+      );
       for (const text of outputs) {
         expect(text).not.toContain('…');
         for (const match of text.matchAll(/“([^”]*)”/gu)) {
           const quote = match[1] ?? '';
-          if (quote === topic) {
+          if (quote === topic || issuePhrases.has(quote)) {
             continue;
           }
           expect(quote).not.toMatch(/[“”]/u);
@@ -1953,7 +1992,10 @@ describe('createMockProvider', () => {
             }
             return false;
           });
-          expect(matchesSourceBoundary).toBe(true);
+          expect(
+            matchesSourceBoundary,
+            `quote ${quote} in ${text}`
+          ).toBe(true);
         }
       }
       expect(expertOutputs).toHaveLength(12);
@@ -2237,7 +2279,7 @@ describe('createMockProvider', () => {
     await expect(provider.complete(request('bid'))).rejects.toThrow();
   });
 
-  it('三类话题十二轮均覆盖观点、侧向洞察与两段式总结', async () => {
+  it('三类话题十二轮均覆盖观点、侧向洞察与收尾总结', async () => {
     const topics = [
       'AI 编程工具会如何改变初级软件工程师的培养？',
       '客服中心应该全面使用 AI 自动回复吗？',
@@ -2284,7 +2326,7 @@ describe('createMockProvider', () => {
         expect(output).not.toContain('…');
         for (const match of output.matchAll(/“([^”]*)”/gu)) {
           const quote = match[1] ?? '';
-          if (quote === topic) {
+          if (quote === topic || issueDefinitions.some(({ issue }) => issue === quote)) {
             continue;
           }
           expect(Array.from(quote).length).toBeGreaterThanOrEqual(4);
@@ -2390,18 +2432,27 @@ describe('createMockProvider', () => {
         ).toBe(false);
       }
 
-      expect(summaryParagraphs).toHaveLength(2);
-      expect(summaryParagraphs[0]).toContain(topicSentence);
-      expect(summaryParagraphs[1]).not.toContain(topicSentence);
-      expect(summaryParagraphs[1]).not.toBe(summaryParagraphs[0]);
-      for (const paragraph of summaryParagraphs) {
-        const paragraphClauses = paragraph
-          .split(/[，。；：！？!?;\r\n]+/u)
-          .map((clause) => clause.trim())
-          .filter(Boolean);
-        expect(new Set(paragraphClauses).size, paragraph).toBe(
-          paragraphClauses.length
-        );
+      expect(summaryParagraphs.length).toBeGreaterThanOrEqual(3);
+      expect(summaryParagraphs.length).toBeLessThanOrEqual(4);
+      expect(summaryParagraphs[0]).toContain(`“${topic}”`);
+      for (const paragraph of summaryParagraphs.slice(1)) {
+        expect(paragraph).not.toContain(topicSentence);
+      }
+      const summaryClauses = flow.summary
+        .split(/[，。；：！？!?;\r\n]+/u)
+        .map((clause) => clause.trim())
+        .filter(Boolean);
+      expect(new Set(summaryClauses).size, flow.summary).toBe(
+        summaryClauses.length
+      );
+      const spokenExperts = flow.roster.filter(
+        ({ alias }) =>
+          alias !== 'H' &&
+          flow.expertSpeech.some((utterance) => utterance.alias === alias)
+      );
+      expect(spokenExperts.length).toBeGreaterThanOrEqual(2);
+      for (const expert of spokenExperts) {
+        expect(summaryParagraphs[0]).toContain(expert.name);
       }
       for (const clause of (summaryParagraphs[1] ?? '').split(/[。！？!?]/u)) {
         const speakersInClause = flow.roster.filter(
@@ -2411,6 +2462,13 @@ describe('createMockProvider', () => {
             clause.includes(name)
         );
         expect(speakersInClause.length).toBeLessThanOrEqual(2);
+      }
+      expect(summaryParagraphs.at(-1)).toContain('感谢');
+      expect(summaryParagraphs.at(-1)).not.toMatch(/[？?]/u);
+      if (divergences.length > 0) {
+        expect(summaryParagraphs[1]).toContain('分歧');
+      } else {
+        expect(summaryParagraphs[1]).toMatch(/[？?]$/u);
       }
     }
   });

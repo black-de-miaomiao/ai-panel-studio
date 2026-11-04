@@ -597,26 +597,24 @@ interface UtteranceTemplateData {
   targetIsHost: boolean;
   targetName: string;
   reference: string;
+  negative: boolean;
   stance: string;
   argument: MockArgument;
 }
 
-function agreementReference(targetName: string, reference: string): string {
-  const quote = reference.match(/^“([^”]+)”$/u)?.[1];
-  if (quote) {
-    return `${targetName}刚才说${reference}`;
-  }
-  return `${targetName}刚才的判断`;
+function withStance(
+  lead: string,
+  firstSpeech: boolean,
+  stance: string,
+  argument: MockArgument
+): string {
+  return firstSpeech
+    ? `${lead}：我${withoutFinalPunctuation(stance)}；${argument.text}`
+    : `${lead}：${argument.text}`;
 }
 
-function responseReference(
-  targetIsHost: boolean,
-  targetName: string,
-  reference: string
-): string {
-  return targetIsHost
-    ? `${targetName}刚才提出的问题`
-    : agreementReference(targetName, reference);
+function hostObjectionLead(targetName: string, phrase: string): string {
+  return `针对${targetName}刚才提出的问题，${phrase}`;
 }
 
 function referenceHasNegativeStance(reference: string): boolean {
@@ -667,120 +665,202 @@ const UTTERANCE_TEMPLATES: Record<
         : `这项判断可以这样核对：${argument.text}`
   ],
   rebut: [
-    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) => {
-      const response = responseReference(targetIsHost, targetName, reference);
-      return referenceHasNegativeStance(reference)
-        ? firstSpeech
-          ? `针对${response}，我有异议，先核对：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `针对${response}，我有异议，先核对：${argument.text}`
-        : firstSpeech
-          ? `我不同意${response}：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `我不同意${response}：${argument.text}`;
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, negative, argument }) => {
+      const lead = targetIsHost
+        ? `针对${targetName}刚才的问题，我的看法是`
+        : negative
+          ? reference
+            ? `${targetName}说的${reference}，我倒不这么看`
+            : `对${targetName}的判断，我倒不这么看`
+          : reference
+            ? `${targetName}说${reference}，我不同意`
+            : `我不同意${targetName}的判断`;
+      return withStance(lead, firstSpeech, stance, argument);
     },
-    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) => {
-      const response = responseReference(targetIsHost, targetName, reference);
-      return referenceHasNegativeStance(reference)
-        ? firstSpeech
-          ? `回应${response}，我有异议，需检查：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `回应${response}，我有异议，需检查：${argument.text}`
-        : firstSpeech
-          ? `回应${response}，我不赞同：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `我不赞同${response}，依据是：${argument.text}`;
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, negative, argument }) => {
+      const lead = targetIsHost
+        ? `接着${targetName}刚才的提问，我不赞同`
+        : negative
+          ? reference
+            ? `${targetName}刚才说${reference}，我有不同看法`
+            : `对${targetName}的说法，我有不同看法`
+          : reference
+            ? `${targetName}刚才说${reference}，我不赞同`
+            : `${targetName}的说法，我不赞同`;
+      return withStance(lead, firstSpeech, stance, argument);
     },
-    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) => {
-      const response = responseReference(targetIsHost, targetName, reference);
-      return referenceHasNegativeStance(reference)
-        ? firstSpeech
-          ? `关于${response}，我有异议，关键是核验：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `关于${response}，我有异议，关键是核验：${argument.text}`
-        : firstSpeech
-          ? `关于${response}，我有异议：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `听完${response}，我有异议：${argument.text}`;
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, negative, argument }) => {
+      const lead = targetIsHost
+        ? `对于${targetName}刚提的问题，我不认同`
+        : negative
+          ? reference
+            ? `${targetName}刚才说的${reference}，恐怕要分情况看`
+            : `对${targetName}的观点，恐怕要分情况看`
+          : reference
+            ? `我不认同${targetName}刚才说的${reference}`
+            : `${targetName}的观点，我不认同`;
+      return withStance(lead, firstSpeech, stance, argument);
     },
-    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) => {
-      const response = responseReference(targetIsHost, targetName, reference);
-      return referenceHasNegativeStance(reference)
-        ? firstSpeech
-          ? `针对${response}，我有异议，需对照条件：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `针对${response}，我有异议，需对照条件：${argument.text}`
-        : firstSpeech
-          ? `针对${response}，我不认同：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `考虑${response}，我不认同：${argument.text}`;
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, negative, argument }) => {
+      const lead = targetIsHost
+        ? `听完${targetName}提出的问题，我不敢苟同`
+        : negative
+          ? reference
+            ? `对${targetName}提到的${reference}，我说个反例`
+            : `对${targetName}的那套，我说个反例`
+          : reference
+            ? `对${targetName}提到的${reference}，我不敢苟同`
+            : `对${targetName}的那套，我不敢苟同`;
+      return withStance(lead, firstSpeech, stance, argument);
     },
-    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) => {
-      const response = responseReference(targetIsHost, targetName, reference);
-      return referenceHasNegativeStance(reference)
-        ? firstSpeech
-          ? `听完${response}，我有异议，需再次核验：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `结合${response}，我有异议，需再次核验：${argument.text}`
-        : firstSpeech
-          ? `听完${response}，我不赞同：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `我不赞同${response}：${argument.text}`;
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, negative, argument }) => {
+      const lead = targetIsHost
+        ? `对着${targetName}那个问题，我的看法不一样`
+        : negative
+          ? reference
+            ? `听完${targetName}说的${reference}，我不这么看`
+            : `听完${targetName}的意见，我不这么看`
+          : reference
+            ? `听完${targetName}说的${reference}，我的看法不一样`
+            : `听完${targetName}的意见，我的看法不一样`;
+      return withStance(lead, firstSpeech, stance, argument);
     },
-    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
-      firstSpeech
-        ? `我对${responseReference(targetIsHost, targetName, reference)}有异议：我${withoutFinalPunctuation(stance)}；${argument.text}`
-        : `针对${responseReference(targetIsHost, targetName, reference)}，我不认同：${argument.text}`
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, negative, argument }) => {
+      const lead = targetIsHost
+        ? `我的看法和${targetName}这个问题相反`
+        : negative
+          ? reference
+            ? `对${targetName}刚才说的${reference}，我有反例`
+            : `对${targetName}的思路，我的看法相反`
+          : reference
+            ? `${targetName}提到的${reference}，我要反对`
+            : `我的看法和${targetName}的思路相反`;
+      return withStance(lead, firstSpeech, stance, argument);
+    }
   ],
   supplement: [
-    ({ targetIsHost, targetName, reference, argument }) =>
-      targetIsHost
-        ? argument.text
-        : `我认同${agreementReference(targetName, reference)}，还要核对：${argument.text}`,
-    ({ targetIsHost, targetName, reference, argument }) =>
-      targetIsHost
-        ? argument.text
-        : `沿着${agreementReference(targetName, reference)}，另一个条件是：${argument.text}`,
-    ({ targetIsHost, targetName, reference, argument }) =>
-      targetIsHost
-        ? argument.text
-        : `在${agreementReference(targetName, reference)}这个基础上，还应检查：${argument.text}`,
-    ({ targetIsHost, targetName, reference, argument }) =>
-      targetIsHost
-        ? argument.text
-        : `我赞同${agreementReference(targetName, reference)}，补充的观察点是：${argument.text}`,
-    ({ targetIsHost, targetName, reference, argument }) =>
-      targetIsHost
-        ? argument.text
-        : `同一前提下，${agreementReference(targetName, reference)}还需要看：${argument.text}`,
-    ({ targetIsHost, targetName, reference, argument }) =>
-      targetIsHost
-        ? argument.text
-        : `我接着${agreementReference(targetName, reference)}补上一项：${argument.text}`
+    ({ firstSpeech, stance, targetIsHost, targetName, reference, argument }) => {
+      const lead = targetIsHost
+        ? `针对${targetName}刚才的提问，我再补一点`
+        : reference
+          ? `${targetName}刚才说${reference}，我很认同，再补一点`
+          : `我很认同${targetName}的判断，再补一点`;
+      return withStance(lead, firstSpeech, stance, argument);
+    },
+    ({ firstSpeech, stance, targetIsHost, targetName, reference, argument }) => {
+      const lead = targetIsHost
+        ? `接着${targetName}刚提的问题，我补一项`
+        : reference
+          ? `${targetName}刚才说${reference}，我接着补一项`
+          : `接着${targetName}的说法，我补一项`;
+      return withStance(lead, firstSpeech, stance, argument);
+    },
+    ({ firstSpeech, stance, targetIsHost, targetName, reference, argument }) => {
+      const lead = targetIsHost
+        ? `对于${targetName}提出的问题，还可以看`
+        : reference
+          ? `沿着${targetName}提到的${reference}，还可以看`
+          : `沿着${targetName}的观点，还可以看`;
+      return withStance(lead, firstSpeech, stance, argument);
+    },
+    ({ firstSpeech, stance, targetIsHost, targetName, reference, argument }) => {
+      const lead = targetIsHost
+        ? `听完${targetName}那个问题，我也有同感`
+        : reference
+          ? `${targetName}说的${reference}我也有同感`
+          : `我对${targetName}的那套也有同感`;
+      return withStance(lead, firstSpeech, stance, argument);
+    },
+    ({ firstSpeech, stance, targetIsHost, targetName, reference, argument }) => {
+      const lead = targetIsHost
+        ? `对着${targetName}这个问题，还有一个观察点`
+        : reference
+          ? `沿着${targetName}说的${reference}，还有一个观察点`
+          : `沿着${targetName}的意见，还有一个观察点`;
+      return withStance(lead, firstSpeech, stance, argument);
+    },
+    ({ firstSpeech, stance, targetIsHost, targetName, reference, argument }) => {
+      const lead = targetIsHost
+        ? `我的看法和${targetName}刚才的问题一致，我也想接上一句`
+        : reference
+          ? `${targetName}提到的${reference}说得没错`
+          : `${targetName}的思路说得没错`;
+      return withStance(lead, firstSpeech, stance, argument);
+    }
   ],
   interrupt: [
-    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
-      firstSpeech
-        ? `我有异议，${responseReference(targetIsHost, targetName, reference)}还需核对：我${withoutFinalPunctuation(stance)}；${argument.text}`
-        : `我先回应${responseReference(targetIsHost, targetName, reference)}，我有异议：${argument.text}`,
-    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
-      referenceHasNegativeStance(reference)
-        ? firstSpeech
-          ? `听完${responseReference(targetIsHost, targetName, reference)}，我有异议，需核对：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `我先打断一下，回应${responseReference(targetIsHost, targetName, reference)}，我有异议：${argument.text}`
-        : firstSpeech
-          ? `听完${responseReference(targetIsHost, targetName, reference)}，我不赞同：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `我先打断一下，我不赞同${responseReference(targetIsHost, targetName, reference)}：${argument.text}`,
-    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
-      referenceHasNegativeStance(reference)
-        ? firstSpeech
-          ? `针对${responseReference(targetIsHost, targetName, reference)}，我有异议，需重新核验：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `回应${responseReference(targetIsHost, targetName, reference)}，我有异议，需重新核验：${argument.text}`
-        : firstSpeech
-          ? `针对${responseReference(targetIsHost, targetName, reference)}，我不认同：我${withoutFinalPunctuation(stance)}；${argument.text}`
-          : `我的判断与${responseReference(targetIsHost, targetName, reference)}不同，我有异议，依据是：${argument.text}`,
-    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
-      firstSpeech
-        ? `我需要立即回应${responseReference(targetIsHost, targetName, reference)}，我有异议：我${withoutFinalPunctuation(stance)}；${argument.text}`
-        : `回应${responseReference(targetIsHost, targetName, reference)}，我有异议，重点是：${argument.text}`,
-    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
-      firstSpeech
-        ? `针对${responseReference(targetIsHost, targetName, reference)}，我有异议：我${withoutFinalPunctuation(stance)}；${argument.text}`
-        : `我对${responseReference(targetIsHost, targetName, reference)}保留意见，也有异议：${argument.text}`,
-    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
-      firstSpeech
-        ? `等一下，${responseReference(targetIsHost, targetName, reference)}，我有异议：我${withoutFinalPunctuation(stance)}；${argument.text}`
-        : `我不会沿用${responseReference(targetIsHost, targetName, reference)}，我有异议：${argument.text}`
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, negative, argument }) => {
+      const lead = targetIsHost
+        ? `对着${targetName}刚才的问题，我不同意`
+        : negative
+          ? reference
+            ? `我先打断一下，${targetName}说的${reference}，我倒不这么看`
+            : `我先打断一下，我对${targetName}的说法有不同看法`
+          : reference
+            ? `我先打断一下，${targetName}说的${reference}，我不同意`
+            : `我先打断一下，我不同意${targetName}的说法`;
+      return withStance(lead, firstSpeech, stance, argument);
+    },
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, negative, argument }) => {
+      const lead = targetIsHost
+        ? `针对${targetName}刚才的提问，我不认同`
+        : negative
+          ? reference
+            ? `我先插一句，${targetName}提到的${reference}，我难以认同`
+            : `我先插一句，我难以认同${targetName}的观点`
+          : reference
+            ? `我先插一句，${targetName}提到的${reference}，我不认同`
+            : `我先插一句，我不认同${targetName}的观点`;
+      return withStance(lead, firstSpeech, stance, argument);
+    },
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, negative, argument }) => {
+      const lead = targetIsHost
+        ? `接着${targetName}刚提的问题，我不赞同`
+        : negative
+          ? reference
+            ? `先停一下，${targetName}说的${reference}，要分情况看`
+            : `先停一下，${targetName}的那套要分情况看`
+          : reference
+            ? `先停一下，${targetName}说的${reference}，我不赞同`
+            : `先停一下，我不赞同${targetName}的那套`;
+      return withStance(lead, firstSpeech, stance, argument);
+    },
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, negative, argument }) => {
+      const lead = targetIsHost
+        ? `对于${targetName}提出的问题，这点我不敢苟同`
+        : negative
+          ? reference
+            ? `我必须马上回应${targetName}刚才说的${reference}，我说个反例`
+            : `我必须马上回应${targetName}的意见，我说个反例`
+          : reference
+            ? `我必须马上回应${targetName}刚才说的${reference}，这点我不敢苟同`
+            : `我必须马上回应${targetName}的意见，这点我不敢苟同`;
+      return withStance(lead, firstSpeech, stance, argument);
+    },
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, negative, argument }) => {
+      const lead = targetIsHost
+        ? `听完${targetName}那个问题，我不敢苟同`
+        : negative
+          ? reference
+            ? `对不起打断一下，${targetName}提到的${reference}，我不这么看`
+            : `对不起打断一下，${targetName}的思路，我不这么看`
+          : reference
+            ? `对不起打断一下，${targetName}提到的${reference}，我不敢苟同`
+            : `对不起打断一下，${targetName}的思路，我不敢苟同`;
+      return withStance(lead, firstSpeech, stance, argument);
+    },
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, negative, argument }) => {
+      const lead = targetIsHost
+        ? `我的看法和${targetName}这个问题相反，这点我反对`
+        : negative
+          ? reference
+            ? `我先回应${targetName}提到的${reference}，我遇到反例`
+            : `我先回应${targetName}的判断，我遇到反例`
+          : reference
+            ? `我先回应${targetName}提到的${reference}，这点我反对`
+            : `我先回应${targetName}的判断，这点我反对`;
+      return withStance(lead, firstSpeech, stance, argument);
+    }
   ]
 };
 
@@ -1075,6 +1155,12 @@ function buildBid(
         ({ issue }) => issue === peerArgument.issue
       )
     : undefined;
+  const supplementSpoken = generatedActs.some(({ act }) => act === 'supplement');
+  const rebutSpoken = generatedActs.some(({ act }) => act === 'rebut');
+  const deferObjection =
+    entries.some(({ speakerAlias }) => speakerAlias === 'H') &&
+    generatedActs.length >= 2 &&
+    !supplementSpoken;
   const expertAliases = roster
     .map(({ alias }) => alias)
     .filter(isExpertAlias)
@@ -1100,6 +1186,10 @@ function buildBid(
   } else if (matchingUnusedArgument && peerArgument) {
     if (matchingUnusedArgument.side === peerArgument.side) {
       proposedIntent = 'supplement';
+    } else if (deferObjection) {
+      // 讨论已展开且本场还没有出现补充：调度器的 intent 权重偏向反驳与抢答，
+      // 只靠紧急度压不住；先让同向补充上场，再恢复反驳与抢答（F 节补充稳定性）。
+      proposedIntent = 'raise_hand';
     } else {
       proposedIntent =
         interruptAllowed && interruptOdds < 0.55 ? 'interrupt' : 'rebut';
@@ -1107,6 +1197,16 @@ function buildBid(
   } else {
     proposedIntent = 'raise_hand';
   }
+  const firstSupplement = proposedIntent === 'supplement' && !supplementSpoken;
+  const firstObjection =
+    !rebutSpoken &&
+    (proposedIntent === 'rebut' ||
+      (proposedIntent === 'interrupt' &&
+        Boolean(
+          matchingUnusedArgument &&
+            peerArgument &&
+            matchingUnusedArgument.side !== peerArgument.side
+        )));
   const wantsToSpeak =
     addressedByHost ||
     (!speakerJustSpoke &&
@@ -1115,6 +1215,8 @@ function buildBid(
         unusedArguments.length === 0
           ? peerEntry
           : deterministicBid ||
+              firstSupplement ||
+              firstObjection ||
               createRng(`mock-bid-wants:${seed}`)() < 0.58
       ));
   const intent =
@@ -1132,9 +1234,14 @@ function buildBid(
       ? 0.99
       : intent === 'interrupt'
         ? 0.86 + urgencySample * 0.1
-      : deterministicBid
-        ? 0.88 + urgencySample * 0.08
-        : 0.58 + urgencySample * 0.2;
+        : firstSupplement || (intent === 'rebut' && !rebutSpoken)
+          ? 0.95 + urgencySample * 0.03
+          : matchingUnusedArgument &&
+              (intent === 'rebut' || proposedIntent === 'supplement')
+            ? 0.82 + urgencySample * 0.12
+            : deterministicBid
+              ? 0.88 + urgencySample * 0.08
+              : 0.58 + urgencySample * 0.2;
   const replyTo = addressedByHost && !isBridgePrompt
     ? 'H'
     : addressedByHost && isBridgePrompt && bridgeOpponentAlias
@@ -1200,27 +1307,27 @@ const EXHAUSTED_RESPONSE_TEMPLATES: Record<
   ],
   rebut: [
     ({ reference, detail }) => `我不同意${reference}，还要核对${detail}。`,
-    ({ reference, detail }) => `回应${reference}，我对${detail}仍有异议。`,
-    ({ reference, detail }) => `关于${reference}，我有异议，关键仍是检验${detail}。`,
-    ({ reference, detail }) => `考虑${reference}，我不赞同忽略${detail}。`,
-    ({ reference, detail }) => `我对${reference}有异议，原因是${detail}。`,
-    ({ reference, detail }) => `围绕${reference}，我有异议，这点还需核清：${detail}。`
+    ({ reference, detail }) => `对${reference}，我不赞同：${detail}也要一起看。`,
+    ({ reference, detail }) => `我不认同${reference}，还要核对${detail}。`,
+    ({ reference, detail }) => `听完${reference}，我不敢苟同，${detail}还说不清。`,
+    ({ reference, detail }) => `我和${reference}相反，${detail}就是关键。`,
+    ({ reference, detail }) => `在这点上我和${reference}不一样，${detail}还要看。`
   ],
   interrupt: [
-    ({ reference, detail }) => `我有异议：${reference}还需核对${detail}。`,
-    ({ reference, detail }) => `回应${reference}，我不同意忽略${detail}。`,
-    ({ reference, detail }) => `针对${reference}，我不赞同跳过${detail}。`,
-    ({ reference, detail }) => `我想立即回应${reference}：我对${detail}有异议。`,
-    ({ reference, detail }) => `对${reference}我有异议，尤其要核验${detail}。`,
-    ({ reference, detail }) => `等一下，我有异议：${reference}还需把${detail}说清。`
+    ({ reference, detail }) => `我先反对${reference}这个判断，还要核对${detail}。`,
+    ({ reference, detail }) => `我先插一句，${reference}我不认同，还要看${detail}。`,
+    ({ reference, detail }) => `对不起，${reference}我不赞同，${detail}还要确认。`,
+    ({ reference, detail }) => `先停一下，${reference}我不敢苟同，${detail}也少不了。`,
+    ({ reference, detail }) => `我要反对${reference}，${detail}也要核。`,
+    ({ reference, detail }) => `对于${reference}，我难以认同，${detail}马上要核对。`
   ],
   supplement: [
-    ({ reference, detail }) => `沿着${reference}，还应核对${detail}。`,
     ({ reference, detail }) => `我认同${reference}，补充一点：${detail}。`,
-    ({ reference, detail }) => `针对${reference}，另一个待核对点是${detail}。`,
-    ({ reference, detail }) => `在${reference}基础上，我还想确认${detail}。`,
-    ({ reference, detail }) => `我赞同${reference}，也要检查${detail}。`,
-    ({ reference, detail }) => `承接${reference}，可以进一步核验${detail}。`
+    ({ reference, detail }) => `沿着${reference}，还可以核对${detail}。`,
+    ({ reference, detail }) => `在${reference}基础上，另一个条件是${detail}。`,
+    ({ reference, detail }) => `我也有同感，${detail}也值得看。`,
+    ({ reference, detail }) => `承接${reference}，可以进一步核验${detail}。`,
+    ({ reference, detail }) => `针对${reference}，另一个待核对点是${detail}。`
   ]
 };
 
@@ -1229,20 +1336,20 @@ const NEGATIVE_REFERENCE_TEMPLATES: Record<
   readonly TextTemplate<ExhaustedResponseData>[]
 > = {
   rebut: [
-    ({ reference, detail }) => `针对${reference}，我有异议，先核对${detail}。`,
-    ({ reference, detail }) => `回应${reference}，我有异议，更关键的是${detail}。`,
-    ({ reference, detail }) => `围绕${reference}，我有异议，先把${detail}核清。`,
-    ({ reference, detail }) => `关于${reference}，我有异议，还需要检验${detail}。`,
-    ({ reference, detail }) => `结合${reference}，我有异议，想确认${detail}。`,
-    ({ reference, detail }) => `就${reference}而言，我有异议，下一步应核实${detail}。`
+    ({ reference, detail }) => `对${reference}，我倒不这么看，还要核对${detail}。`,
+    ({ reference, detail }) => `${reference}这一点，我有不同看法：${detail}也要看。`,
+    ({ reference, detail }) => `说实话，${reference}恐怕要分情况看，${detail}还要核。`,
+    ({ reference, detail }) => `对${reference}，我说个反例：${detail}。`,
+    ({ reference, detail }) => `我不这么看：${reference}，${detail}也说明问题。`,
+    ({ reference, detail }) => `在这点上我和${reference}相反，${detail}就是我的依据。`
   ],
   interrupt: [
-    ({ reference, detail }) => `等一下，我有异议：${reference}还需要核实${detail}。`,
-    ({ reference, detail }) => `我想立即回应${reference}，对${detail}有异议。`,
-    ({ reference, detail }) => `先停一下，我对${reference}有异议，还要看${detail}。`,
-    ({ reference, detail }) => `回应${reference}，我有异议，会把${detail}核清。`,
-    ({ reference, detail }) => `我有异议，先补充核验${reference}涉及的${detail}。`,
-    ({ reference, detail }) => `稍等，我有异议：${reference}的适用条件还要查${detail}。`
+    ({ reference, detail }) => `我先打断一下，对${reference}，我倒不这么看：${detail}。`,
+    ({ reference, detail }) => `等一下，${reference}恐怕要分情况看，${detail}还要核。`,
+    ({ reference, detail }) => `我先插一句，${reference}我有不同看法：${detail}。`,
+    ({ reference, detail }) => `对不起打断一下，${reference}我说个反例：${detail}。`,
+    ({ reference, detail }) => `先停一下，我不这么看：${reference}，${detail}也支持我。`,
+    ({ reference, detail }) => `我必须马上回应${reference}，这点我说个反例：${detail}。`
   ]
 };
 
@@ -1275,7 +1382,7 @@ function exhaustedResponse(
     EXHAUSTED_RESPONSE_TEMPLATES[act] ??
     EXHAUSTED_RESPONSE_TEMPLATES.statement!;
   const reference = sourceClaim
-    ? `${targetName}刚才说“${sourceClaim}”`
+    ? `${targetName}刚才说的“${sourceClaim}”`
     : `${targetName}刚才的判断`;
   const index = nextTemplateIndex(
     `utterance:${act}:exhausted:${speakerAlias}`,
@@ -1485,11 +1592,18 @@ function buildUtterance(
       target?.alias === 'H' || targetUtterance?.speakerAlias === 'H',
     targetName,
     reference,
+    negative: referenceHasNegativeStance(reference),
     stance: speaker.stance,
     argument: responseArgument
   };
   if (isFollowUpAnswer) {
-    return `${responseArgument.detail.kind === 'example' ? '具体来说' : responseArgument.detail.kind === 'condition' ? '在这个条件下' : '可以核对'}，${responseArgument.text}`;
+    const opener =
+      responseArgument.detail.kind === 'example'
+        ? '比如，'
+        : responseArgument.detail.kind === 'condition'
+          ? '前提是，'
+          : '可以';
+    return `${opener}${responseArgument.text}`;
   }
   if (isBridgeReply && targetArgument) {
     const targetProfile = profileForSpeaker(topic, target!);
@@ -1498,7 +1612,9 @@ function buildUtterance(
       targetUtterance?.content.includes(targetProfile.stanceClaim)
         ? targetProfile.stanceClaim
         : targetArgument.claim;
-    const bridgeReference = `${targetName}刚才说“${targetClaim}”`;
+    const bridgeLead = referenceHasNegativeStance(`“${targetClaim}”`)
+      ? `${targetName}刚才说“${targetClaim}”，我倒不这么看`
+      : `${targetName}刚才说的“${targetClaim}”，我不同意`;
     const unusedOpposing =
       argument &&
       argument.issue === targetArgument.issue &&
@@ -1506,7 +1622,7 @@ function buildUtterance(
         ? argument
         : undefined;
     if (unusedOpposing) {
-      return `我不同意${bridgeReference}：${unusedOpposing.text}`;
+      return `${bridgeLead}：${unusedOpposing.text}`;
     }
     const opposing = argumentList.find(
       ({ issue, side }) =>
@@ -1516,13 +1632,13 @@ function buildUtterance(
       opposing &&
       earlierSpeech.every((content) => !content.includes(opposing.detail.text))
     ) {
-      return `我不同意${bridgeReference}，具体要看：${opposing.detail.text}。`;
+      return `${bridgeLead}，具体要看：${opposing.detail.text}。`;
     }
     if (
       opposing &&
       earlierSpeech.every((content) => !content.includes(opposing.position))
     ) {
-      return `我不同意${bridgeReference}：我仍${opposing.position}。`;
+      return `${bridgeLead}：我仍${opposing.position}。`;
     }
     return exhaustedResponse(
       act,
@@ -1751,11 +1867,10 @@ function buildInsights(context: MockContext): unknown {
       utterance.act === 'supplement' &&
       speakerArgument.side === relatedArgument.side
     ) {
-      const accepted = argumentsByAlias.get(pair[0]!.alias) ?? relatedArgument;
       const key = `${issue.issue}:${pair.map(({ alias }) => alias).join(':')}`;
       consensus.set(key, {
         ref: null,
-        content: `${pair[0]!.name}与${pair[1]!.name}都${accepted.position}`,
+        content: `${pair[0]!.name}与${pair[1]!.name}都${relatedArgument.position}`,
         participants: pair.map(({ alias }) => alias),
         evidence
       });
@@ -1786,56 +1901,209 @@ function buildInsights(context: MockContext): unknown {
   };
 }
 
+interface SummaryInsightLine {
+  kind: 'consensus' | 'divergence';
+  content: string;
+  stances: Array<{ name: string; position: string }>;
+}
+
+function parseInsightLines(text: string): SummaryInsightLine[] {
+  return text.split(/\r?\n/u).flatMap((line) => {
+    const match = line.match(/^[CD]\d+\s+(共识|分歧)：(.+)$/u);
+    if (!match) {
+      return [];
+    }
+    const kind = match[1] === '共识' ? 'consensus' : 'divergence';
+    let body = match[2] ?? '';
+    const stances: Array<{ name: string; position: string }> = [];
+    const stanceMatch = body.match(/（([^（）]*)）\s*(?:（已化解）)?$/u);
+    if (stanceMatch) {
+      body = body.slice(0, stanceMatch.index).trim();
+      for (const part of (stanceMatch[1] ?? '').split(/[；;]/u)) {
+        const stance = part.trim().match(/^(.+?)：(.*)$/u);
+        if (stance) {
+          stances.push({
+            name: (stance[1] ?? '').trim(),
+            position: (stance[2] ?? '').trim()
+          });
+        }
+      }
+    }
+    return [{ kind, content: body.trim(), stances }];
+  });
+}
+
+const POSITION_STANCE_VERB =
+  /^(有条件支持|有条件反对|并不支持|不太支持|不支持|不赞成|不认同|不赞同|不反对|不看好|支持|赞成|认同|认可|赞同|反对|担心|担忧|警惕|质疑|审慎|谨慎|主张|认为|倾向|保留|强调|要求|指出|建议|重视|说明|核算|分组|提前)/u;
+
+function positionStanceVerb(position: string): string {
+  return position.match(POSITION_STANCE_VERB)?.[1] ?? '认为';
+}
+
 function buildSummary(context: MockContext): string {
   const topic = readString(context.topic) || '本场议题';
   const roster = readRoster(context);
   const transcript = transcriptEntries(context);
-  const issueSummaries = topicIssues(topic).flatMap((issue) => {
-    const representatives = issue.sides.map((side) => {
-      for (const utterance of transcript) {
-        if (!isExpertAlias(utterance.speakerAlias)) {
-          continue;
-        }
-        const speaker = rosterEntry(roster, utterance.speakerAlias);
-        const profile = speaker && profileForSpeaker(topic, speaker);
-        const argument = profile?.arguments.find(
-          (candidate) =>
-            candidate.issue === issue.issue &&
-            candidate.side === side &&
-            utterance.content.includes(candidate.claim)
-        );
-        if (argument && speaker) {
-          return {
-            name: speaker.name,
-            claim: argument.claim
-          };
-        }
+  const expertEntries = transcript.filter(({ speakerAlias }) =>
+    isExpertAlias(speakerAlias)
+  );
+  const spokenAliases = [
+    ...new Set(expertEntries.map(({ speakerAlias }) => speakerAlias))
+  ].sort((left, right) => Number(left.slice(1)) - Number(right.slice(1)));
+  const seatOf = (name: string) =>
+    roster.find((entry) => entry.name === name && isExpertAlias(entry.alias))
+      ?.alias ?? 'E9';
+  const spokenArgumentsFor = (alias: string) => {
+    const speaker = rosterEntry(roster, alias);
+    if (!speaker) {
+      return [];
+    }
+    const argumentList = argumentsForSpeaker(topic, speaker);
+    const spoken: Array<{ position: string; claim: string }> = [];
+    for (const utterance of expertEntries.filter(
+      (entry) => entry.speakerAlias === alias
+    )) {
+      const argument = argumentList.find(
+        ({ claim, text }) =>
+          utterance.content.includes(claim) || utterance.content.includes(text)
+      );
+      if (argument && !spoken.some(({ claim }) => claim === argument.claim)) {
+        spoken.push({ position: argument.position, claim: argument.claim });
       }
-      return undefined;
-    });
-    const spokenSides = representatives.filter(
-      (value): value is { name: string; claim: string } => Boolean(value)
+    }
+    return spoken.length > 0
+      ? spoken
+      : [
+          {
+            position: argumentList[0]?.position ?? speaker.stance,
+            claim: argumentList[0]?.claim ?? ''
+          }
+        ];
+  };
+  const utteranceCountFor = (alias: string) =>
+    expertEntries.filter((entry) => entry.speakerAlias === alias).length;
+
+  const verbCounts = new Map<string, number>();
+  const speakerClauses = spokenAliases.flatMap((alias) => {
+    const speaker = rosterEntry(roster, alias);
+    if (!speaker) {
+      return [];
+    }
+    const candidates = spokenArgumentsFor(alias);
+    const chosen = candidates.find(
+      ({ position }) => (verbCounts.get(positionStanceVerb(position)) ?? 0) < 2
     );
-    return (
-      spokenSides.length === 2 &&
-      new Set(spokenSides.map(({ name }) => name)).size === 2
-    )
-      ? [
-          `${issue.issue}：${spokenSides
-            .map(({ name, claim }) => `${name}认为“${claim}”`)
-            .join('；')}`
-        ]
-      : [];
+    if (chosen) {
+      const verb = positionStanceVerb(chosen.position);
+      verbCounts.set(verb, (verbCounts.get(verb) ?? 0) + 1);
+      return [namedPosition(speaker.name, chosen.position)];
+    }
+    return [
+      `${speaker.name}的具体依据是“${candidates[0]?.claim ?? ''}”`
+    ];
   });
-  const openingParagraph =
+  const firstParagraph =
     `今天的话题是“${topic}”。` +
-    '本场讨论先亮出判断，再围绕具体依据展开回应。';
-  const claimsParagraph =
-    issueSummaries.length > 0
-      ? `${issueSummaries.join('。')}。`
-      : '嘉宾尚未就各项议题提出可引用的具体主张。';
-  return `${openingParagraph}\n\n${claimsParagraph}`;
+    (speakerClauses.length > 0
+      ? speakerClauses.join('；')
+      : '本场讨论先亮出判断，再围绕具体依据展开回应。') +
+    (speakerClauses.length > 0 ? '。' : '');
+
+  const insightLines = parseInsightLines(
+    readString(context.insightsText, readString(context.existingInsightsText))
+  );
+  const issueDefinitions = topicIssues(topic);
+  const divergenceCandidates = new Map<
+    string,
+    { issue: string; sides: Map<string, { name: string; claim: string; weight: number }> }
+  >();
+  for (const line of insightLines) {
+    if (line.kind !== 'divergence') {
+      continue;
+    }
+    const issueName = line.content.split(/[：:]/u)[0]?.trim() ?? '';
+    const issue = issueDefinitions.find(
+      (candidate) => candidate.issue === issueName
+    );
+    if (!issue) {
+      continue;
+    }
+    for (const stance of line.stances) {
+      const speaker = roster.find(
+        (entry) => entry.name === stance.name && isExpertAlias(entry.alias)
+      );
+      const argument =
+        speaker &&
+        argumentsForSpeaker(topic, speaker).find(
+          (candidate) =>
+            candidate.issue === issue.issue && candidate.position === stance.position
+        );
+      if (!speaker || !argument) {
+        continue;
+      }
+      const claimWasSpoken = expertEntries.some(
+        (entry) =>
+          entry.speakerAlias === speaker.alias &&
+          entry.content.includes(argument.claim)
+      );
+      if (!claimWasSpoken) {
+        continue;
+      }
+      const entry =
+        divergenceCandidates.get(issue.issue) ??
+        ({ issue: issue.issue, sides: new Map() } as {
+          issue: string;
+          sides: Map<string, { name: string; claim: string; weight: number }>;
+        });
+      const weight = utteranceCountFor(speaker.alias);
+      const current = entry.sides.get(argument.side);
+      if (!current || current.weight < weight) {
+        entry.sides.set(argument.side, {
+          name: speaker.name,
+          claim: argument.claim,
+          weight
+        });
+      }
+      divergenceCandidates.set(issue.issue, entry);
+    }
+  }
+  const totalWeight = (entry: {
+    sides: Map<string, { weight: number }>;
+  }) => [...entry.sides.values()].reduce((total, side) => total + side.weight, 0);
+  const rankedDivergences = [...divergenceCandidates.values()]
+    .filter((entry) => entry.sides.size === 2)
+    .sort((left, right) => totalWeight(right) - totalWeight(left))
+    .slice(0, 2);
+  const divergenceBlocks = rankedDivergences.map((entry, index) => {
+    const ordered = [...entry.sides.values()].sort(
+      (left, right) => Number(seatOf(left.name).slice(1)) - Number(seatOf(right.name).slice(1))
+    );
+    const first = ordered[0]!;
+    const second = ordered[1]!;
+    return `${index === 0 ? '分歧主要在' : '在'}“${entry.issue}”上：${first.name}认为“${first.claim}”，${second.name}则认为“${second.claim}”`;
+  });
+  const divergenceParagraph =
+    divergenceBlocks.length > 0 ? `${divergenceBlocks.join('。')}。` : '';
+
+  const consensusLine = insightLines.find(
+    (line) => line.kind === 'consensus' && line.content.length > 0
+  );
+  const closingParagraph = consensusLine
+    ? `共识方面，${consensusLine.content}。`
+    : (() => {
+        const covered = new Set(rankedDivergences.map((entry) => entry.issue));
+        const openIssue =
+          issueDefinitions.find((issue) => !covered.has(issue.issue)) ??
+          issueDefinitions[0]!;
+        return `还有一个开放问题：${openIssue.issue}上，双方还缺少哪类可对照的记录？`;
+      })();
+  const thanksParagraph = '感谢各位嘉宾把判断依据说具体，也感谢观众收看。';
+
+  return [firstParagraph, divergenceParagraph, closingParagraph, thanksParagraph]
+    .filter(Boolean)
+    .join('\n\n');
 }
+
 
 function generateText(
   request: LLMRequest,
