@@ -580,7 +580,7 @@ interface DiscussionListItem {
 
 ### 3.7 `POST /api/discussions/:id/pause`
 
-- **说明：** 暂停 `live` 讨论；当前发言完成后停住。
+- **说明：** 暂停 `live` 讨论；接口立即将状态转为 `paused` 并返回当前讨论。已经开始生成的当前发言允许完成，随后引擎等待继续，不再启动下一轮。
 - **请求体：** 无。仅 `live` 状态允许。
 - **成功响应：** `200 OK`
 
@@ -672,10 +672,10 @@ interface DiscussionListItem {
 ### 3.11 `GET /api/discussions/:id/stream?since=<seq>`
 
 - **说明：** 建立指定讨论的 SSE 事件流。
-- **请求参数：** `since` 为可选的非负事件序号。首次连接应使用已取快照的 `snapshot.lastEventSeq`。
-- **请求头：** 浏览器断线重连时自动发送 `Last-Event-ID`；若存在该头，服务端优先于 `since`。
+- **请求参数：** `since` 为可选的非负安全整数事件序号。首次连接应使用已取快照的 `snapshot.lastEventSeq`；若没有 `Last-Event-ID` 和 `since`，服务端从游标 `0` 开始补发。
+- **请求头：** 浏览器断线重连时自动发送 `Last-Event-ID`；若存在该头，服务端优先于 `since`。该头存在但值无效时返回校验错误，不回退到查询参数。
 - **成功响应：** `200 OK`，`Content-Type: text/event-stream; charset=utf-8`，无 JSON 响应体。SSE 示例与全部事件见第 4 节。
-- **可能错误：** 讨论不存在时在建立流之前返回 `404 NOT_FOUND` JSON 错误。
+- **可能错误：** `400 VALIDATION_ERROR`（游标不是非负安全整数、查询参数重复或头部游标无效）；讨论不存在时在建立流之前返回 `404 NOT_FOUND` JSON 错误。
 
 ## 4. SSE 协议
 
@@ -850,7 +850,7 @@ sequenceDiagram
 | `failed` | 重新生成成功 | `POST /api/discussions/:id/lineup/regenerate` | `lineup_ready` |
 | `lineup_ready` | 换一批阵容 | `POST /api/discussions/:id/lineup/regenerate` | `lineup_ready` |
 | `lineup_ready` | 确认开播 | `POST /api/discussions/:id/start` | `live` |
-| `live` | 暂停（当前发言结束后） | `POST /api/discussions/:id/pause` | `paused` |
+| `live` | 请求暂停（立即转为 `paused`，允许当前已开始的发言完成） | `POST /api/discussions/:id/pause` | `paused` |
 | `paused` | 继续 | `POST /api/discussions/:id/resume` | `live` |
 | `live` 或 `paused` | 请求结束 | `POST /api/discussions/:id/end` | `summarizing` |
 | `live` | 正文发言达到 `maxTurns` | 引擎自动转换 | `summarizing` |

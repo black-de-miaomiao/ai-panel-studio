@@ -1,14 +1,12 @@
 import type { LLMProvider, LLMRequest } from './types';
 import { createRng } from '../core/rng';
-
-interface SpeakerProfile {
-  name: string;
-  profession: string;
-  title: string;
-  stance: string;
-  stanceTag: string;
-  persona: string;
-}
+import {
+  topicIssues,
+  topicProfiles,
+  type MockDetailKind,
+  type MockArgument,
+  type SpeakerProfile
+} from './mockProfiles';
 
 interface MockContext extends Record<string, unknown> {
   topic?: string;
@@ -24,7 +22,9 @@ interface MockContext extends Record<string, unknown> {
   speaker?: unknown;
   previousUtterance?: unknown;
   targetAlias?: string | null;
+  targetHasSpoken?: boolean;
   addressed?: boolean;
+  interruptAvailability?: unknown;
   insightsText?: string;
   existingInsightsText?: string;
   divergence?: unknown;
@@ -48,6 +48,12 @@ interface MockTranscriptEntry {
   content: string;
 }
 
+interface MockGeneratedAct {
+  speakerAlias: string;
+  act: string;
+  content: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -60,122 +66,128 @@ function readString(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback;
 }
 
-function topicCore(topic: string): string {
-  const normalized = topic
-    .trim()
-    .replace(/[。！!？?；;：:]+$/gu, '');
-  if (Array.from(normalized).length <= 24) {
-    return normalized || '本场议题';
-  }
-  const firstClause = normalized.split(/[，,。！？!?；;：:]/u)[0]?.trim();
-  return firstClause || normalized || '本场议题';
+function addCjkLatinSpacing(
+  value: string,
+  preservedValues: readonly string[] = []
+): string {
+  let protectedValue = value;
+  const replacements = preservedValues
+    .filter(Boolean)
+    .map((original, index) => {
+      const marker = `\uE000${index}\uE001`;
+      protectedValue = protectedValue.split(original).join(marker);
+      return { marker, original };
+    });
+  const spaced = protectedValue
+    .replace(/([\u4e00-\u9fff])(?=[A-Za-z0-9])/gu, '$1 ')
+    .replace(/([A-Za-z0-9])(?=[\u4e00-\u9fff])/gu, '$1 ');
+  return replacements.reduce(
+    (result, { marker, original }) => result.split(marker).join(original),
+    spaced
+  );
 }
 
-const STANCE_PREFIX = /^(?:有条件支持|支持|担心|认为|反对|主张|倾向)/u;
+function normalizeJsonOutput(value: string): string {
+  const normalize = (input: unknown): unknown => {
+    if (typeof input === 'string') {
+      return addCjkLatinSpacing(input);
+    }
+    if (Array.isArray(input)) {
+      return input.map(normalize);
+    }
+    if (isRecord(input)) {
+      return Object.fromEntries(
+        Object.entries(input).map(([key, item]) => [key, normalize(item)])
+      );
+    }
+    return input;
+  };
+  return JSON.stringify(normalize(JSON.parse(value)));
+}
+
+const STANCE_PREFIX =
+  /^(?:并不支持|不太支持|不支持|不赞成|不认同|不赞同|不反对|有条件支持|有条件反对|不看好|担心|担忧|警惕|质疑|审慎|谨慎|支持|赞成|认同|反对|主张|倾向|认为)/u;
 
 function sentencePoint(value: string): string {
   const compact = value.replace(/\s+/gu, ' ').trim();
   const point =
     compact.split(/[，,。！？!?；;：:]/u)[0]?.trim() || '结合实际条件判断';
-  return STANCE_PREFIX.test(point) ? point : `认为${point}`;
+  const subjectlessPoint = point.replace(/^我\s*/u, '');
+  const neutralPoint =
+    subjectlessPoint.replace(
+      /^(?:并不支持|不支持|不赞成|不认同|不赞同|不反对|反对|担心|担忧|警惕|质疑)\s*/u,
+      ''
+    ) || subjectlessPoint;
+  if (neutralPoint !== subjectlessPoint) {
+    return neutralPoint;
+  }
+  return STANCE_PREFIX.test(subjectlessPoint)
+    ? subjectlessPoint
+    : `认为${subjectlessPoint}`;
 }
 
-function longestCommonSubstring(left: string, right: string): string {
-  const leftCharacters = Array.from(left);
-  const rightCharacters = Array.from(right);
-  let previous = Array<number>(rightCharacters.length + 1).fill(0);
-  let bestLength = 0;
-  let bestEnd = 0;
-
-  for (let leftIndex = 1; leftIndex <= leftCharacters.length; leftIndex += 1) {
-    const current = Array<number>(rightCharacters.length + 1).fill(0);
-    for (
-      let rightIndex = 1;
-      rightIndex <= rightCharacters.length;
-      rightIndex += 1
-    ) {
-      if (leftCharacters[leftIndex - 1] === rightCharacters[rightIndex - 1]) {
-        current[rightIndex] = previous[rightIndex - 1]! + 1;
-        if (current[rightIndex]! > bestLength) {
-          bestLength = current[rightIndex]!;
-          bestEnd = leftIndex;
-        }
-      }
-    }
-    previous = current;
-  }
-  return leftCharacters.slice(bestEnd - bestLength, bestEnd).join('');
-}
-
-function shortQuote(
-  value: string,
-  target: MockRosterEntry,
-  roster: readonly MockRosterEntry[],
-  topic: string
-): string {
-  const boilerplate = [
-    '我的判断是',
-    '我更关注',
-    '我关注',
-    '我担心',
-    '我认为',
-    '我支持',
-    '我反对',
-    '我主张',
-    '围绕',
-    '关于',
-    '对',
-    '就',
-    '你提到',
-    '刚才提到',
-    '刚才说',
-    '刚才的',
-    '提到',
-    '回应',
-    '接着',
-    '顺着',
-    '等一下',
-    '先停一下',
-    '我想立即回应',
-    '我得立即回应',
-    '当场回应',
-    '具体条件',
-    '下一步'
-  ];
-  let fragments = value
-    .split(/[“”「」『』"'“”]/u)
-    .flatMap((part) => [part]);
-  const forbidden = [
-    topicCore(topic),
-    ...roster.map(({ name }) => name),
-    ...roster.map(({ alias }) => alias),
-    ...boilerplate
-  ].filter(Boolean);
-  for (const phrase of forbidden) {
-    fragments = fragments.flatMap((fragment) => fragment.split(phrase));
-  }
-  fragments = fragments.flatMap((fragment) =>
-    fragment.split(/[，,。！？!?；;：:、]/u)
+function profileForSpeaker(
+  topic: string,
+  speaker: MockRosterEntry
+): SpeakerProfile | undefined {
+  return topicProfiles(topic).find(
+    ({ stance }) => stance.trim() === speaker.stance.trim()
   );
+}
 
-  const stance = sentencePoint(target.stance);
-  const ranked = fragments
-    .map((fragment) => fragment.trim())
-    .filter((fragment) => Array.from(fragment).length >= 4)
-    .map((fragment) => longestCommonSubstring(fragment, stance))
-    .filter((fragment) => Array.from(fragment).length >= 4)
-    .sort(
-      (left, right) =>
-        Array.from(right).length - Array.from(left).length
-    );
-  const best = ranked[0];
-  if (!best) {
-    return '';
+function claimForContent(
+  topic: string,
+  speaker: MockRosterEntry,
+  content: string
+): string | undefined {
+  const profile = profileForSpeaker(topic, speaker);
+  if (!profile) {
+    return undefined;
   }
-  const characters = Array.from(best);
-  return characters.length > 12
-    ? `${characters.slice(0, 11).join('')}…`
-    : best;
+  const argument = profile.arguments.find(
+    ({ claim }) => content.includes(claim)
+  );
+  if (argument) {
+    return argument.claim;
+  }
+  return content.includes(profile.stanceClaim) ? profile.stanceClaim : undefined;
+}
+
+function spokenClaimForContent(
+  topic: string,
+  speaker: MockRosterEntry,
+  content: string
+): string | undefined {
+  const profile = profileForSpeaker(topic, speaker);
+  if (!profile) {
+    return undefined;
+  }
+  if (content.includes(profile.stanceClaim)) {
+    return profile.stanceClaim;
+  }
+  return profile.arguments.find(({ claim }) => content.includes(claim))?.claim;
+}
+
+function referenceForUtterance(
+  topic: string,
+  target: MockRosterEntry,
+  utterance: MockTranscriptEntry
+): string {
+  const quote = claimForContent(topic, target, utterance.content);
+  return quote ? `“${quote}”` : '';
+}
+
+function positionReferenceForUtterance(
+  topic: string,
+  target: MockRosterEntry,
+  utterance: MockTranscriptEntry
+): string {
+  const profile = profileForSpeaker(topic, target);
+  const quote =
+    profile && utterance.content.includes(profile.stanceClaim)
+      ? profile.stanceClaim
+      : claimForContent(topic, target, utterance.content);
+  return quote ? `“${quote}”` : '';
 }
 
 function isParticipantAlias(value: unknown): value is string {
@@ -338,46 +350,32 @@ function latestReply(
     .sort((left, right) => right.seq - left.seq)[0];
 }
 
-function readPreviousUtterance(
-  context: MockContext,
-  entries: readonly MockTranscriptEntry[]
-): { alias: string | null; relation: string } {
-  if (isRecord(context.previousUtterance)) {
-    const alias = isParticipantAlias(context.previousUtterance.speakerAlias)
-      ? context.previousUtterance.speakerAlias
-      : null;
-    const relation = readString(context.previousUtterance.relation);
-    if (alias || relation) {
-      return { alias, relation };
-    }
-  }
-  const previous = entries.at(-1);
-  return {
-    alias: previous?.speakerAlias ?? null,
-    relation: ''
-  };
-}
-
 function isExpertAlias(value: unknown): value is string {
   return typeof value === 'string' && /^E\d+$/u.test(value);
 }
 
-function mockStanceRelation(previousTag: string, currentTag: string): string {
-  const direction = (tag: string): 'supportive' | 'opposed' | 'neutral' | 'unknown' => {
-    const normalized = tag.trim();
-    if (/(?:反对|不支持|不赞成|不认同|否定)/u.test(normalized)) {
-      return 'opposed';
-    }
-    if (/(?:支持|赞成|认同|认可|赞同|看好|乐观)/u.test(normalized)) {
-      return 'supportive';
-    }
-    if (/(?:中立|观望|谨慎|审慎|保留)/u.test(normalized)) {
-      return 'neutral';
-    }
-    return 'unknown';
-  };
-  const previousDirection = direction(previousTag);
-  const currentDirection = direction(currentTag);
+type StanceDirection = 'supportive' | 'opposed' | 'neutral' | 'unknown';
+
+function stanceDirection(tag: string): StanceDirection {
+  const normalized = tag.trim();
+  if (/(?:反对|不支持|不赞成|不认同|否定)/u.test(normalized)) {
+    return 'opposed';
+  }
+  if (/(?:支持|赞成|认同|认可|赞同|看好|乐观)/u.test(normalized)) {
+    return 'supportive';
+  }
+  if (/(?:中立|观望|谨慎|审慎|保留)/u.test(normalized)) {
+    return 'neutral';
+  }
+  return 'unknown';
+}
+
+export function mockStanceRelation(
+  previousTag: string,
+  currentTag: string
+): string {
+  const previousDirection = stanceDirection(previousTag);
+  const currentDirection = stanceDirection(currentTag);
   if (previousDirection === 'unknown' || currentDirection === 'unknown') {
     return '方向不明';
   }
@@ -393,163 +391,65 @@ function mockStanceRelation(previousTag: string, currentTag: string): string {
   return '一方中立或谨慎';
 }
 
-function topicProfiles(topic: string): SpeakerProfile[] {
-  if (/程序|编程|开发|代码|软件/u.test(topic)) {
-    return [
-      {
-        name: '陈澄',
-        profession: '软件工程师',
-        title: '应用开发负责人',
-        stance: '支持助手承担重复编码，但新人仍需参与调试和评审。',
-        stanceTag: '有条件支持',
-        persona: '长期带领产品研发团队，表达直接，习惯用交付流程解释问题。'
-      },
-      {
-        name: '周明',
-        profession: '初级程序员导师',
-        title: '工程教育顾问',
-        stance: '担心基础任务减少会挤压新人练习。',
-        stanceTag: '谨慎',
-        persona: '关注新人培养与代码阅读，先讲学习机制，再给具体练习例子。'
-      },
-      {
-        name: '顾言',
-        profession: '劳动经济研究员',
-        title: '数字就业研究员',
-        stance: '认为岗位会重组，但是否减少取决于需求增长和团队分工。',
-        stanceTag: '审慎乐观',
-        persona: '研究技术变迁与就业结构，表达克制，会区分短期替代和长期变化。'
-      },
-      {
-        name: '唐宁',
-        profession: '职业教育教师',
-        title: '软件人才培养负责人',
-        stance: '反对把代码生成当作新人替代品。',
-        stanceTag: '反对',
-        persona: '负责项目式教学，语气平实，常用课堂训练和实习安排举例。'
-      },
-      {
-        name: '许闻溪',
-        profession: 'AI 产品经理',
-        title: '开发工具产品负责人',
-        stance: '支持逐步采用，但要求明确人工复核和责任边界。',
-        stanceTag: '支持',
-        persona: '熟悉开发工具落地，表达清楚，强调可验证的产品机制。'
-      },
-      {
-        name: '林舟',
-        profession: '研发效能顾问',
-        title: '企业工程效能顾问',
-        stance: '认为岗位总量变化取决于需求增长。',
-        stanceTag: '中立',
-        persona: '服务多家研发团队，喜欢拆解指标，避免用单一效率数字下结论。'
-      }
-    ];
+function argumentsForSpeaker(
+  topic: string,
+  speaker: MockRosterEntry
+): readonly MockArgument[] {
+  const exactProfile = profileForSpeaker(topic, speaker);
+  if (exactProfile) {
+    return exactProfile.arguments;
   }
+  const profiles = topicProfiles(topic);
+  const direction = stanceDirection(speaker.stanceTag);
+  const candidates = profiles.filter(
+    ({ stanceTag }) => stanceDirection(stanceTag) === direction
+  );
+  const seat = Number(speaker.alias.slice(1)) - 1;
+  const fallback =
+    candidates.length > 0
+      ? candidates[((seat % candidates.length) + candidates.length) % candidates.length]
+      : profiles[0];
+  return fallback?.arguments ?? [];
+}
 
-  if (/客服|服务|用户|消费者/u.test(topic)) {
-    return [
-      {
-        name: '林知夏',
-        profession: '服务设计师',
-        title: '客户体验顾问',
-        stance: '支持从规则清晰、低风险的服务环节试点。',
-        stanceTag: '支持',
-        persona: '关注服务流程和体验落差，表达具体，善于追问边界条件。'
-      },
-      {
-        name: '沈予安',
-        profession: '消费者研究员',
-        title: '用户研究负责人',
-        stance: '担心复杂问题难以及时转交人工。',
-        stanceTag: '审慎',
-        persona: '长期研究消费者权益，说话温和但会紧扣真实使用情境。'
-      },
-      {
-        name: '许行之',
-        profession: '客户运营专家',
-        title: '服务运营负责人',
-        stance: '有条件支持规则清楚的环节试点，前提是人工可以及时接手疑难问题。',
-        stanceTag: '有条件支持',
-        persona: '负责一线服务运营，习惯从交接流程和异常处理谈问题。'
-      },
-      {
-        name: '程望舒',
-        profession: '劳动关系研究员',
-        title: '数字化转型研究员',
-        stance: '反对用自动化替代服务质量评估。',
-        stanceTag: '反对',
-        persona: '研究组织转型与工作质量，表达谨慎，重视可观察的长期影响。'
-      },
-      {
-        name: '周以宁',
-        profession: '信息安全顾问',
-        title: '数据治理顾问',
-        stance: '支持有限试点，同时要求数据访问和责任边界清楚。',
-        stanceTag: '支持',
-        persona: '熟悉服务数据治理，讲话简洁，常用权限和审计机制说明风险。'
-      },
-      {
-        name: '顾行舟',
-        profession: '产品研究员',
-        title: '智能服务产品研究员',
-        stance: '主张先比较不同问题类型的实际效果。',
-        stanceTag: '中立',
-        persona: '重视实验设计，表达条理清晰，不轻易把局部结果推广到所有场景。'
-      }
-    ];
+function argumentForContent(
+  topic: string,
+  speaker: MockRosterEntry,
+  content: string
+): MockArgument | undefined {
+  const profile = profileForSpeaker(topic, speaker);
+  const argument = argumentsForSpeaker(topic, speaker).find(
+    ({ text, position, claim, detail }) =>
+      content.includes(text) ||
+      content.includes(position) ||
+      content.includes(claim) ||
+      content.includes(detail.text)
+  );
+  if (argument) {
+    return argument;
   }
+  return profile && content.includes(profile.stanceClaim)
+    ? profile.arguments[0]
+    : undefined;
+}
 
-  return [
-    {
-      name: '沈清和',
-      profession: '行业分析师',
-      title: '产业发展研究员',
-      stance: '支持在可控范围内先验证实际收益。',
-      stanceTag: '支持',
-      persona: '长期研究产业变化，表达简洁，习惯提出可以验证的条件。'
-    },
-    {
-      name: '顾南乔',
-      profession: '社会学研究者',
-      title: '社会影响研究员',
-      stance: '担心效率提升掩盖不同群体承担的成本。',
-      stanceTag: '审慎',
-      persona: '关注社会影响和利益分配，语气平和，会追问谁受益、谁承担风险。'
-    },
-    {
-      name: '周景行',
-      profession: '政策顾问',
-      title: '公共政策研究员',
-      stance: '有条件支持先开展可评估的试点，前提是建立清楚的评估与纠偏机制。',
-      stanceTag: '有条件支持',
-      persona: '熟悉政策实施与评估，表达严谨，会拆解执行条件。'
-    },
-    {
-      name: '林予川',
-      profession: '一线从业者',
-      title: '实践项目负责人',
-      stance: '反对仓促推广，认为现场经验不能被抽象指标取代。',
-      stanceTag: '反对',
-      persona: '长期参与具体项目，表达直白，常用一线流程和真实约束举例。'
-    },
-    {
-      name: '唐知意',
-      profession: '数据分析师',
-      title: '应用评估负责人',
-      stance: '支持小范围试点，但要求把结果和不确定性同时公开。',
-      stanceTag: '谨慎乐观',
-      persona: '擅长评估方法，讲话克制，强调样本范围和结论边界。'
-    },
-    {
-      name: '许闻溪',
-      profession: '风险治理专家',
-      title: '风险管理顾问',
-      stance: '主张先明确失败时的责任与补救。',
-      stanceTag: '中立',
-      persona: '关注风险预案，表达清楚，喜欢把讨论落到应急机制。'
-    }
-  ];
+function positionArgumentForContent(
+  topic: string,
+  speaker: MockRosterEntry,
+  content: string
+): MockArgument | undefined {
+  const profile = profileForSpeaker(topic, speaker);
+  return profile && content.includes(profile.stanceClaim)
+    ? profile.arguments[0]
+    : argumentForContent(topic, speaker, content);
+}
+
+function insightArgumentForContent(
+  topic: string,
+  speaker: MockRosterEntry,
+  content: string
+): MockArgument | undefined {
+  return positionArgumentForContent(topic, speaker, content);
 }
 
 const MOCK_SURNAMES = [
@@ -664,7 +564,16 @@ function buildLineup(
   const experts = profileIndices.flatMap((profileIndex, index) => {
     const profile = profiles[profileIndex];
     return profile
-      ? [{ ...profile, name: fictionalName(lineupSeed, index) }]
+      ? [
+          {
+            name: fictionalName(lineupSeed, index),
+            profession: profile.profession,
+            title: profile.title,
+            stance: profile.stance,
+            stanceTag: profile.stanceTag,
+            persona: profile.persona
+          }
+        ]
       : [];
   });
 
@@ -684,10 +593,47 @@ function buildLineup(
 type TextTemplate<T> = (data: T) => string;
 
 interface UtteranceTemplateData {
-  topic: string;
+  firstSpeech: boolean;
+  targetIsHost: boolean;
   targetName: string;
-  quote: string;
+  reference: string;
   stance: string;
+  argument: MockArgument;
+}
+
+function agreementReference(targetName: string, reference: string): string {
+  const quote = reference.match(/^“([^”]+)”$/u)?.[1];
+  if (quote) {
+    return `${targetName}刚才说${reference}`;
+  }
+  return `${targetName}刚才的判断`;
+}
+
+function responseReference(
+  targetIsHost: boolean,
+  targetName: string,
+  reference: string
+): string {
+  return targetIsHost
+    ? `${targetName}刚才提出的问题`
+    : agreementReference(targetName, reference);
+}
+
+function referenceHasNegativeStance(reference: string): boolean {
+  const quote = reference.match(/^“([^”]+)”$/u)?.[1] ?? '';
+  return /(?:反对|不支持|不赞成|不认同|不赞同|担心|担忧|警惕|质疑)/u.test(
+    quote
+  );
+}
+
+function hostTargetReference(targetName: string, reference: string): string {
+  return /^“[^”]+”$/u.test(reference)
+    ? `${targetName}刚才说${reference}`
+    : `${targetName}刚才的判断`;
+}
+
+function withoutFinalPunctuation(value: string): string {
+  return value.replace(/[。！？!?]+$/u, '');
 }
 
 const UTTERANCE_TEMPLATES: Record<
@@ -695,52 +641,171 @@ const UTTERANCE_TEMPLATES: Record<
   readonly TextTemplate<UtteranceTemplateData>[]
 > = {
   statement: [
-    ({ stance }) => `我${stance}；还要把适用条件说清。`,
-    ({ topic, stance }) => `就${topic}而言，我${stance}，还要核实实际影响。`,
-    ({ stance }) => `我${stance}，这也决定了后续怎样衡量结果。`,
-    ({ stance }) => `我${stance}；不能只凭一个条件下结论。`,
-    ({ stance }) => `我${stance}，实施范围需要逐步核对。`,
-    ({ stance }) => `我${stance}，具体效果还要结合现场观察。`
+    ({ firstSpeech, stance, argument }) =>
+      firstSpeech
+        ? `我${withoutFinalPunctuation(stance)}；${argument.text}`
+        : argument.text,
+    ({ firstSpeech, stance, argument }) =>
+      firstSpeech
+        ? `我先说明判断：我${withoutFinalPunctuation(stance)}；${argument.text}`
+        : `关于${argument.issue}，我想核对：${argument.text}`,
+    ({ firstSpeech, stance, argument }) =>
+      firstSpeech
+        ? `我的判断是：我${withoutFinalPunctuation(stance)}；${argument.text}`
+        : `先看${argument.issue}：${argument.text}`,
+    ({ firstSpeech, stance, argument }) =>
+      firstSpeech
+        ? `我先给出判断：我${withoutFinalPunctuation(stance)}；${argument.text}`
+        : `就${argument.issue}而言：${argument.text}`,
+    ({ firstSpeech, stance, argument }) =>
+      firstSpeech
+        ? `我${withoutFinalPunctuation(stance)}；${argument.text}`
+        : `${argument.issue}需要看这一点：${argument.text}`,
+    ({ firstSpeech, stance, argument }) =>
+      firstSpeech
+        ? `我的起点是：我${withoutFinalPunctuation(stance)}；${argument.text}`
+        : `这项判断可以这样核对：${argument.text}`
   ],
   rebut: [
-    ({ targetName, quote, stance }) =>
-      quote
-        ? `我不同意${targetName}提到的“${quote}”；我${stance}。`
-        : `我不同意${targetName}这个判断；我${stance}。`,
-    ({ targetName, stance }) =>
-      `我不同意${targetName}这一步推断；我${stance}。`,
-    ({ stance }) => `这个结论还缺一个条件；我${stance}。`,
-    ({ stance }) => `我不接受这一步推断，因为我${stance}。`,
-    ({ stance }) => `关键条件还没有说清；我${stance}。`,
-    ({ stance }) => `这个判断还需要核实；我${stance}。`
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) => {
+      const response = responseReference(targetIsHost, targetName, reference);
+      return referenceHasNegativeStance(reference)
+        ? firstSpeech
+          ? `针对${response}，我有异议，先核对：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `针对${response}，我有异议，先核对：${argument.text}`
+        : firstSpeech
+          ? `我不同意${response}：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `我不同意${response}：${argument.text}`;
+    },
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) => {
+      const response = responseReference(targetIsHost, targetName, reference);
+      return referenceHasNegativeStance(reference)
+        ? firstSpeech
+          ? `回应${response}，我有异议，需检查：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `回应${response}，我有异议，需检查：${argument.text}`
+        : firstSpeech
+          ? `回应${response}，我不赞同：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `我不赞同${response}，依据是：${argument.text}`;
+    },
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) => {
+      const response = responseReference(targetIsHost, targetName, reference);
+      return referenceHasNegativeStance(reference)
+        ? firstSpeech
+          ? `关于${response}，我有异议，关键是核验：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `关于${response}，我有异议，关键是核验：${argument.text}`
+        : firstSpeech
+          ? `关于${response}，我有异议：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `听完${response}，我有异议：${argument.text}`;
+    },
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) => {
+      const response = responseReference(targetIsHost, targetName, reference);
+      return referenceHasNegativeStance(reference)
+        ? firstSpeech
+          ? `针对${response}，我有异议，需对照条件：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `针对${response}，我有异议，需对照条件：${argument.text}`
+        : firstSpeech
+          ? `针对${response}，我不认同：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `考虑${response}，我不认同：${argument.text}`;
+    },
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) => {
+      const response = responseReference(targetIsHost, targetName, reference);
+      return referenceHasNegativeStance(reference)
+        ? firstSpeech
+          ? `听完${response}，我有异议，需再次核验：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `结合${response}，我有异议，需再次核验：${argument.text}`
+        : firstSpeech
+          ? `听完${response}，我不赞同：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `我不赞同${response}：${argument.text}`;
+    },
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
+      firstSpeech
+        ? `我对${responseReference(targetIsHost, targetName, reference)}有异议：我${withoutFinalPunctuation(stance)}；${argument.text}`
+        : `针对${responseReference(targetIsHost, targetName, reference)}，我不认同：${argument.text}`
   ],
   supplement: [
-    ({ targetName, stance }) => `接着${targetName}的看法，我${stance}。`,
-    ({ stance }) => `我认同这个方向，并补上一项条件：我${stance}。`,
-    ({ targetName, stance }) => `我也认可${targetName}的判断；我${stance}。`,
-    ({ stance }) => `这项补充会影响评估，我${stance}。`,
-    ({ stance }) => `另一项需要纳入的因素是：我${stance}。`,
-    ({ stance }) => `沿着刚才的讨论，我${stance}，还要核对影响范围。`
+    ({ targetIsHost, targetName, reference, argument }) =>
+      targetIsHost
+        ? argument.text
+        : `我认同${agreementReference(targetName, reference)}，还要核对：${argument.text}`,
+    ({ targetIsHost, targetName, reference, argument }) =>
+      targetIsHost
+        ? argument.text
+        : `沿着${agreementReference(targetName, reference)}，另一个条件是：${argument.text}`,
+    ({ targetIsHost, targetName, reference, argument }) =>
+      targetIsHost
+        ? argument.text
+        : `在${agreementReference(targetName, reference)}这个基础上，还应检查：${argument.text}`,
+    ({ targetIsHost, targetName, reference, argument }) =>
+      targetIsHost
+        ? argument.text
+        : `我赞同${agreementReference(targetName, reference)}，补充的观察点是：${argument.text}`,
+    ({ targetIsHost, targetName, reference, argument }) =>
+      targetIsHost
+        ? argument.text
+        : `同一前提下，${agreementReference(targetName, reference)}还需要看：${argument.text}`,
+    ({ targetIsHost, targetName, reference, argument }) =>
+      targetIsHost
+        ? argument.text
+        : `我接着${agreementReference(targetName, reference)}补上一项：${argument.text}`
   ],
   interrupt: [
-    ({ targetName, stance }) =>
-      `我不同意${targetName}这个判断，得当场回应：我${stance}。`,
-    ({ stance }) => `这一点我不能接受，必须现在说清：我${stance}。`,
-    ({ stance }) => `我得立即回应这个推断；我${stance}。`,
-    ({ stance }) => `这处冲突不能略过，我当场反对：我${stance}。`,
-    ({ stance }) => `我不同意这个结论，关键原因是我${stance}。`,
-    ({ stance }) => `先说明我的异议：我${stance}，这个判断还需要核实。`
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
+      firstSpeech
+        ? `我有异议，${responseReference(targetIsHost, targetName, reference)}还需核对：我${withoutFinalPunctuation(stance)}；${argument.text}`
+        : `我先回应${responseReference(targetIsHost, targetName, reference)}，我有异议：${argument.text}`,
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
+      referenceHasNegativeStance(reference)
+        ? firstSpeech
+          ? `听完${responseReference(targetIsHost, targetName, reference)}，我有异议，需核对：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `我先打断一下，回应${responseReference(targetIsHost, targetName, reference)}，我有异议：${argument.text}`
+        : firstSpeech
+          ? `听完${responseReference(targetIsHost, targetName, reference)}，我不赞同：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `我先打断一下，我不赞同${responseReference(targetIsHost, targetName, reference)}：${argument.text}`,
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
+      referenceHasNegativeStance(reference)
+        ? firstSpeech
+          ? `针对${responseReference(targetIsHost, targetName, reference)}，我有异议，需重新核验：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `回应${responseReference(targetIsHost, targetName, reference)}，我有异议，需重新核验：${argument.text}`
+        : firstSpeech
+          ? `针对${responseReference(targetIsHost, targetName, reference)}，我不认同：我${withoutFinalPunctuation(stance)}；${argument.text}`
+          : `我的判断与${responseReference(targetIsHost, targetName, reference)}不同，我有异议，依据是：${argument.text}`,
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
+      firstSpeech
+        ? `我需要立即回应${responseReference(targetIsHost, targetName, reference)}，我有异议：我${withoutFinalPunctuation(stance)}；${argument.text}`
+        : `回应${responseReference(targetIsHost, targetName, reference)}，我有异议，重点是：${argument.text}`,
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
+      firstSpeech
+        ? `针对${responseReference(targetIsHost, targetName, reference)}，我有异议：我${withoutFinalPunctuation(stance)}；${argument.text}`
+        : `我对${responseReference(targetIsHost, targetName, reference)}保留意见，也有异议：${argument.text}`,
+    ({ firstSpeech, stance, targetName, targetIsHost, reference, argument }) =>
+      firstSpeech
+        ? `等一下，${responseReference(targetIsHost, targetName, reference)}，我有异议：我${withoutFinalPunctuation(stance)}；${argument.text}`
+        : `我不会沿用${responseReference(targetIsHost, targetName, reference)}，我有异议：${argument.text}`
   ]
 };
 
 interface HostTemplateData {
-  topic: string;
+  fullTopic: string;
   guestList: string;
   targetName: string;
+  targetHasSpoken: boolean;
   profession: string;
-  quote: string;
+  reference: string;
+  detailKind: MockDetailKind;
   divergence: string;
-  sides: readonly { name: string; position: string }[];
+  targetIsInDivergence: boolean;
+  otherName: string;
+  sides: readonly { alias: string; name: string; position: string }[];
+}
+
+function namedPosition(name: string, position: string): string {
+  const point = position.replace(/[。！？!?]+$/u, '').trim();
+  return (
+    STANCE_PREFIX.test(point) ||
+    /^(?:强调|要求|指出|建议|重视|保留|说明|核算|分组|提前)/u.test(point)
+  )
+    ? `${name}${point}`
+    : `${name}认为${point}`;
 }
 
 const HOST_TEMPLATES: Record<
@@ -748,139 +813,347 @@ const HOST_TEMPLATES: Record<
   readonly TextTemplate<HostTemplateData>[]
 > = {
   opening: [
-    ({ topic, guestList }) =>
-      `今天讨论${topic}。嘉宾有：${guestList}。请各位从自己的观察说起。`,
-    ({ topic, guestList }) =>
-      `今天的话题是${topic}。到场嘉宾依次是：${guestList}。请各位先亮出判断。`,
-    ({ topic, guestList }) =>
-      `我们围绕${topic}展开讨论。现场嘉宾是：${guestList}。请各位从最关心的问题谈起。`,
-    ({ topic, guestList }) =>
-      `今天聚焦${topic}。欢迎${guestList}。我们先请各位简要说说判断。`
+    ({ fullTopic, guestList }) =>
+      `今天我们围绕话题“${fullTopic}”展开讨论。到场嘉宾有：${guestList}。请各位先亮出判断。`,
+    ({ fullTopic, guestList }) =>
+      `本场将讨论“${fullTopic}”。今天参与讨论的嘉宾有：${guestList}。请各位从自己的观察谈起。`,
+    ({ fullTopic, guestList }) =>
+      `今天的圆桌聚焦“${fullTopic}”。到场嘉宾包括：${guestList}。请各位先说说判断。`,
+    ({ fullTopic, guestList }) =>
+      `我们从“${fullTopic}”这个问题开始。欢迎${guestList}来到圆桌，请各位按自己的关注点进入讨论。`
   ],
   follow_up: [
-    ({ targetName, quote, profession }) =>
-      quote
-        ? `${targetName}提到“${quote}”，请从${profession}的角度说说，最需要核实什么？`
-        : `${targetName}的看法值得继续讨论，请从${profession}的角度说说，最需要核实什么？`,
-    ({ targetName, profession }) =>
-      `${targetName}，从${profession}的角度看，哪项条件最影响你的判断？`,
-    ({ targetName, profession }) =>
-      `${targetName}的观点还可以从${profession}的实践核实，你会先看哪一项？`,
-    ({ targetName, profession }) =>
-      `请${targetName}从${profession}的角度回应刚才的分歧，最关键的证据是什么？`
+    ({ targetName, reference, detailKind }) =>
+      detailKind === 'example'
+        ? `${hostTargetReference(targetName, reference)}，能举一个具体情形吗？`
+        : detailKind === 'condition'
+          ? `${hostTargetReference(targetName, reference)}，在什么条件下这个判断才成立？`
+          : `${hostTargetReference(targetName, reference)}，哪项记录可以核对这个判断？`,
+    ({ targetName, reference, detailKind }) =>
+      detailKind === 'example'
+        ? `围绕${hostTargetReference(targetName, reference)}，能补充一个实际例子吗？`
+        : detailKind === 'condition'
+          ? `针对${hostTargetReference(targetName, reference)}，成立前还需要满足什么条件？`
+          : `关于${hostTargetReference(targetName, reference)}，有什么证据可以验证？`,
+    ({ targetName, reference, detailKind }) =>
+      detailKind === 'example'
+        ? `能否用一个具体案例说明${hostTargetReference(targetName, reference)}？`
+        : detailKind === 'condition'
+          ? `${hostTargetReference(targetName, reference)}适用于哪些条件？`
+          : `哪项记录可以检验${hostTargetReference(targetName, reference)}？`,
+    ({ targetName, reference, detailKind }) =>
+      detailKind === 'example'
+        ? `围绕${hostTargetReference(targetName, reference)}，能描述一个可核对的情形吗？`
+        : detailKind === 'condition'
+          ? `要把${hostTargetReference(targetName, reference)}用于现场，需要先满足什么条件？`
+          : `核实${hostTargetReference(targetName, reference)}时，哪项证据最关键？`
   ],
   invite: [
-    ({ targetName, profession, topic }) =>
-      `${targetName}，结合${profession}的实践，针对${topic}你会先核实什么？`,
-    ({ targetName, profession }) =>
-      `也请${targetName}从${profession}的角度谈谈，这项议题的适用边界在哪里？`,
-    ({ targetName, profession }) =>
-      `${targetName}，你的${profession}视角能补充哪些条件？`,
-    ({ targetName, profession }) =>
-      `请${targetName}结合${profession}的经验，说明哪些情形需要例外处理。`
+    ({ targetName, profession, targetHasSpoken, reference }) =>
+      targetHasSpoken
+        ? `${hostTargetReference(targetName, reference)}，请补充一个尚未谈到的观察点。`
+        : `${targetName}，结合${profession}的工作，你对这个议题的初步判断是什么？`,
+    ({ targetName, profession, targetHasSpoken, reference }) =>
+      targetHasSpoken
+        ? `沿着${hostTargetReference(targetName, reference)}，请从另一个角度补充判断。`
+        : `${targetName}，从${profession}角度看，你支持还是反对这项安排？`,
+    ({ targetName, profession, targetHasSpoken, reference }) =>
+      targetHasSpoken
+        ? `也请${hostTargetReference(targetName, reference)}之外的内容补充判断。`
+        : `也请${targetName}亮明立场：你认为这项安排值得推进？`,
+    ({ targetName, targetHasSpoken, reference }) =>
+      targetHasSpoken
+        ? `${hostTargetReference(targetName, reference)}还涉及哪些新角度？`
+        : `${targetName}，你对这个议题是支持、反对，还是有条件支持？`
   ],
   bridge: [
-    ({ targetName, divergence, sides }) =>
-      sides.length >= 2
-        ? `${sides[0]?.name}${sides[0]?.position}，${sides[1]?.name}则${sides[1]?.position}。${targetName}，请回应双方分歧中的关键条件。`
-        : `关于${divergence}，目前还有条件需要说清。${targetName}，你怎么看？`,
-    ({ targetName, divergence, sides }) =>
-      sides.length >= 2
-        ? `${sides[0]?.name}${sides[0]?.position}；${sides[1]?.name}则${sides[1]?.position}。${targetName}，你认为哪项条件最关键？`
-        : `${divergence}还需要具体讨论。${targetName}，你会先核对哪项条件？`,
-    ({ targetName, divergence, sides }) =>
-      sides.length >= 2
-        ? `${sides[0]?.name}${sides[0]?.position}，而${sides[1]?.name}${sides[1]?.position}。${targetName}，请回应这处差异。`
-        : `${divergence}还有哪些分歧需要辨清？${targetName}，请谈谈你的判断。`,
-    ({ targetName, divergence, sides }) =>
-      sides.length >= 2
-        ? `${sides[0]?.name}的观点是${sides[0]?.position}，${sides[1]?.name}则${sides[1]?.position}。${targetName}，你愿意回应哪一边？`
-        : `${divergence}仍有待展开。${targetName}，你认为关键条件是什么？`
+    ({ targetName, divergence, sides, targetIsInDivergence, otherName }) =>
+      sides.length >= 2 && targetIsInDivergence
+        ? `${namedPosition(sides[0]?.name ?? '一方', sides[0]?.position ?? '')}；${namedPosition(sides[1]?.name ?? '另一方', sides[1]?.position ?? '')}。${targetName}，你怎么回应${otherName}的判断？`
+        : `${divergence}上还有不同判断。${targetName}，你会先核对什么？`,
+    ({ targetName, divergence, sides, targetIsInDivergence, otherName }) =>
+      sides.length >= 2 && targetIsInDivergence
+        ? `分歧在${divergence}：${namedPosition(sides[0]?.name ?? '一方', sides[0]?.position ?? '')}；${namedPosition(sides[1]?.name ?? '另一方', sides[1]?.position ?? '')}。${targetName}，能否回应${otherName}提出的条件？`
+        : `关于${divergence}，还需要补上另一种判断。${targetName}，你会先检查哪项条件？`,
+    ({ targetName, divergence, sides, targetIsInDivergence, otherName }) =>
+      sides.length >= 2 && targetIsInDivergence
+        ? `关于${divergence}，${namedPosition(sides[0]?.name ?? '一方', sides[0]?.position ?? '')}；${namedPosition(sides[1]?.name ?? '另一方', sides[1]?.position ?? '')}。${targetName}，你准备怎样回应${otherName}的主张？`
+        : `${divergence}仍有关键依据待核对。${targetName}，你认为哪条证据最重要？`,
+    ({ targetName, divergence, sides, targetIsInDivergence, otherName }) =>
+      sides.length >= 2 && targetIsInDivergence
+        ? `${namedPosition(sides[0]?.name ?? '一方', sides[0]?.position ?? '')}；${namedPosition(sides[1]?.name ?? '另一方', sides[1]?.position ?? '')}。${targetName}，你对${otherName}的主张有什么回应？`
+        : `${divergence}的边界还没有说清。${targetName}，什么条件会改变你的判断？`
   ],
   closing: [
-    ({ topic }) =>
-      `今天关于${topic}先讨论到这里，后续仍可核对具体条件。`,
-    ({ topic }) =>
-      `感谢各位讨论${topic}，接下来可以继续追踪实际变化。`,
-    ({ topic }) =>
-      `关于${topic}，还有问题值得继续展开。感谢各位嘉宾参与。`,
-    ({ topic }) =>
-      `我们先把${topic}留作开放议题，感谢各位嘉宾和观众。`
+    () => '今天的讨论先到这里，感谢各位嘉宾分享具体判断。',
+    () => '感谢各位把不同依据说清楚，也感谢观众收看。',
+    () => '本场先告一段落，后续可以继续核对讨论中的条件。',
+    () => '谢谢各位嘉宾参与，也感谢观众陪伴这场讨论。'
   ]
 };
+
+function argumentSideCoverage(
+  topic: string,
+  roster: readonly MockRosterEntry[],
+  events: readonly { speakerAlias: string; content: string }[]
+): Map<string, Set<string>> {
+  const coverage = new Map(
+    topicIssues(topic).map(({ issue }) => [issue, new Set<string>()])
+  );
+  for (const event of events) {
+    if (!isExpertAlias(event.speakerAlias)) {
+      continue;
+    }
+    const speaker = rosterEntry(roster, event.speakerAlias);
+    const profile = speaker && profileForSpeaker(topic, speaker);
+    if (!profile) {
+      continue;
+    }
+    for (const argument of profile.arguments) {
+      if (
+        event.content.includes(argument.claim) ||
+        event.content.includes(argument.text) ||
+        event.content.includes(argument.position) ||
+        event.content.includes(argument.detail.text)
+      ) {
+        coverage.get(argument.issue)?.add(argument.side);
+      }
+    }
+    if (event.content.includes(profile.stanceClaim)) {
+      const stanceArgument = profile.arguments[0];
+      if (stanceArgument) {
+        coverage.get(stanceArgument.issue)?.add(stanceArgument.side);
+      }
+    }
+  }
+  return coverage;
+}
+
+function leastCoveredArgument(
+  topic: string,
+  speaker: MockRosterEntry,
+  candidates: readonly MockArgument[],
+  roster: readonly MockRosterEntry[],
+  events: readonly { speakerAlias: string; content: string }[]
+): MockArgument | undefined {
+  const issues = topicIssues(topic);
+  const coverage = argumentSideCoverage(topic, roster, events);
+  const seat = Math.max(0, Number(speaker.alias.slice(1)) - 1);
+  return [...candidates].sort((left, right) => {
+    const leftIssueIndex = issues.findIndex(({ issue }) => issue === left.issue);
+    const rightIssueIndex = issues.findIndex(({ issue }) => issue === right.issue);
+    const leftSides = coverage.get(left.issue) ?? new Set<string>();
+    const rightSides = coverage.get(right.issue) ?? new Set<string>();
+    const leftScore =
+      leftSides.size === 0 ? 1 : leftSides.size === 1 && !leftSides.has(left.side) ? 0 : leftSides.size === 1 ? 2 : 3;
+    const rightScore =
+      rightSides.size === 0 ? 1 : rightSides.size === 1 && !rightSides.has(right.side) ? 0 : rightSides.size === 1 ? 2 : 3;
+    const seatOffset = (issueIndex: number) =>
+      (issueIndex - (seat % issues.length) + issues.length) % issues.length;
+    return (
+      leftScore - rightScore ||
+      seatOffset(leftIssueIndex) - seatOffset(rightIssueIndex)
+    );
+  })[0];
+}
 
 function buildBid(
   context: MockContext,
   callIndex: number,
-  discussionId: string
+  discussionId: string,
+  generatedActs: readonly MockGeneratedAct[]
 ): unknown {
   const entries = transcriptEntries(context);
   const speakerAlias = readString(context.speakerAlias, 'E1');
   const roster = readRoster(context);
   const speaker = speakerFromContext(context, speakerAlias, roster);
-  const previous = readPreviousUtterance(context, entries);
-  const previousAlias =
-    previous.alias ?? entries.at(-1)?.speakerAlias ?? null;
-  const previousSpeaker = previousAlias
-    ? rosterEntry(roster, previousAlias)
-    : undefined;
-  const relation =
-    previous.relation ||
-    (previousAlias === 'H'
-      ? '主持人发言'
-      : previousSpeaker
-        ? mockStanceRelation(previousSpeaker.stanceTag, speaker.stanceTag)
-        : '暂无上一条发言');
-  const addressed =
+  const topic = readString(context.topic);
+  const latestHostUtterance = [...entries]
+    .reverse()
+    .find(({ speakerAlias: alias }) => alias === 'H');
+  const hostContent = latestHostUtterance?.content ?? '';
+  const hostNamedExperts = roster.filter(
+    ({ alias, name }) =>
+      isExpertAlias(alias) && hostContent.includes(name)
+  );
+  const namedHostTarget =
+    latestHostUtterance?.replyToAlias && isExpertAlias(latestHostUtterance.replyToAlias)
+      ? latestHostUtterance.replyToAlias
+      : latestHostUtterance
+        ? roster.find(
+            ({ alias, name }) =>
+              isExpertAlias(alias) &&
+              (latestHostUtterance.content.includes(`${name}，`) ||
+                latestHostUtterance.content.includes(`${name}刚才`))
+          )?.alias
+        : undefined;
+  const isNamedHostPrompt =
+    Boolean(latestHostUtterance && namedHostTarget);
+  const hostPromptAnswered = Boolean(
+    latestHostUtterance &&
+      namedHostTarget &&
+      entries.some(
+        ({ seq, speakerAlias: alias }) =>
+          seq > latestHostUtterance.seq && alias === namedHostTarget
+      )
+  );
+  const hostPromptPending = isNamedHostPrompt && !hostPromptAnswered;
+  const isBridgePrompt =
+    hostPromptPending &&
+    /回应/u.test(hostContent) &&
+    hostNamedExperts.length >= 2;
+  const addressedByHost =
     context.addressed === true ||
-    context.wasAddressed === true ||
-    context.isAddressed === true;
+    ((context.wasAddressed === true || context.isAddressed === true) &&
+      !hostPromptAnswered) ||
+    (hostPromptPending && namedHostTarget === speakerAlias);
+  const anotherExpertAddressed =
+    hostPromptPending && namedHostTarget !== speakerAlias;
   const seed = `${discussionId}:${callIndex}:${speakerAlias}`;
-  const wantsToSpeak =
-    addressed ||
-    (previousAlias !== speakerAlias &&
-      createRng(`mock-bid-wants:${seed}`)() < 0.5);
+  const interruptAvailability = isRecord(context.interruptAvailability)
+    ? context.interruptAvailability
+    : {};
+  const interruptAllowed = interruptAvailability.allowed === true;
   const interruptOdds = createRng(`mock-bid-interrupt:${seed}`)();
-  const proposedIntent =
-    relation === '主持人发言'
-      ? 'raise_hand'
-      : relation === '方向相同' || relation === '相同'
-        ? 'supplement'
-        : relation === '方向相反' || relation === '不同'
-          ? interruptOdds < 0.16
-            ? 'interrupt'
-            : 'rebut'
-          : 'raise_hand';
+  const speakerArguments = argumentsForSpeaker(topic, speaker);
+  const speakerHistory = [
+    ...entries
+      .filter(({ speakerAlias: alias }) => alias === speakerAlias)
+      .map(({ content }) => content),
+    ...generatedActs
+      .filter(({ speakerAlias: alias }) => alias === speakerAlias)
+      .map(({ content }) => content)
+  ];
+  const unusedArguments = speakerArguments.filter(
+    ({ claim, text, position, detail }) =>
+      speakerHistory.every(
+        (content) =>
+          !content.includes(claim) &&
+          !content.includes(text) &&
+          !content.includes(position) &&
+          !content.includes(detail.text)
+      )
+  );
+  const bridgeOpponentAlias =
+    addressedByHost && isBridgePrompt && latestHostUtterance
+      ? roster.find(
+          ({ alias, name }) =>
+            isExpertAlias(alias) &&
+            alias !== speakerAlias &&
+            latestHostUtterance.content.includes(name)
+        )?.alias
+      : undefined;
+  const bridgeOpponentEntry =
+    bridgeOpponentAlias && latestHostUtterance
+      ? [...entries]
+          .reverse()
+          .find(
+            ({ speakerAlias: alias, seq }) =>
+              alias === bridgeOpponentAlias && seq < latestHostUtterance.seq
+          )
+      : undefined;
+  const previousExpertEntry =
+    [...entries]
+      .reverse()
+      .find(
+        ({ speakerAlias: alias }) =>
+          isExpertAlias(alias) && alias !== speakerAlias
+      );
+  const peerEntry =
+    isBridgePrompt && addressedByHost
+      ? bridgeOpponentEntry
+      : previousExpertEntry;
+  const peer = peerEntry
+    ? rosterEntry(roster, peerEntry.speakerAlias)
+    : undefined;
+  const peerArgument =
+    peer && peerEntry
+      ? positionArgumentForContent(topic, peer, peerEntry.content)
+      : undefined;
+  const matchingUnusedArgument = peerArgument
+    ? unusedArguments.find(
+        ({ issue }) => issue === peerArgument.issue
+      )
+    : undefined;
+  const expertAliases = roster
+    .map(({ alias }) => alias)
+    .filter(isExpertAlias)
+    .sort(
+      (left, right) =>
+        Number(left.slice(1)) - Number(right.slice(1))
+    );
+  const previousExpertIndex = expertAliases.indexOf(
+    previousExpertEntry?.speakerAlias ?? ''
+  );
+  const nextExpectedAlias =
+    previousExpertIndex < 0
+      ? expertAliases[0]
+      : expertAliases[(previousExpertIndex + 1) % expertAliases.length];
+  const deterministicBid =
+    speakerAlias === nextExpectedAlias;
+  const lastSpeakerAlias =
+    entries.at(-1)?.speakerAlias ?? generatedActs.at(-1)?.speakerAlias;
+  const speakerJustSpoke = lastSpeakerAlias === speakerAlias;
+  let proposedIntent: 'raise_hand' | 'supplement' | 'rebut' | 'interrupt';
+  if (addressedByHost && !isBridgePrompt) {
+    proposedIntent = 'raise_hand';
+  } else if (matchingUnusedArgument && peerArgument) {
+    if (matchingUnusedArgument.side === peerArgument.side) {
+      proposedIntent = 'supplement';
+    } else {
+      proposedIntent =
+        interruptAllowed && interruptOdds < 0.55 ? 'interrupt' : 'rebut';
+    }
+  } else {
+    proposedIntent = 'raise_hand';
+  }
+  const wantsToSpeak =
+    addressedByHost ||
+    (!speakerJustSpoke &&
+      !anotherExpertAddressed &&
+      Boolean(
+        unusedArguments.length === 0
+          ? peerEntry
+          : deterministicBid ||
+              createRng(`mock-bid-wants:${seed}`)() < 0.58
+      ));
   const intent =
-    wantsToSpeak && proposedIntent === 'interrupt'
-      ? proposedIntent
-      : proposedIntent === 'interrupt'
-        ? 'rebut'
-        : proposedIntent;
+    proposedIntent === 'interrupt' &&
+    (!wantsToSpeak || !matchingUnusedArgument || !peerArgument ||
+      matchingUnusedArgument.side === peerArgument.side)
+      ? 'rebut'
+      : proposedIntent;
   const urgencySample = createRng(`mock-bid-urgency:${seed}`)();
   const urgency = !wantsToSpeak
-    ? 0.2 + urgencySample * 0.3
-    : addressed
-      ? 0.88 + urgencySample * 0.12
+    ? anotherExpertAddressed
+      ? 0.05 + urgencySample * 0.1
+      : 0.15 + urgencySample * 0.2
+    : addressedByHost
+      ? 0.99
       : intent === 'interrupt'
-        ? 0.85 + urgencySample * 0.15
-        : intent === 'rebut'
-          ? 0.62 + urgencySample * 0.18
-          : intent === 'supplement'
-            ? 0.6 + urgencySample * 0.15
-            : 0.35 + urgencySample * 0.25;
-  const replyTo =
-    previousAlias && previousAlias !== speakerAlias
-      ? previousAlias
-      : isExpertAlias(context.replyToAlias) &&
-          context.replyToAlias !== speakerAlias
-        ? context.replyToAlias
-        : null;
+        ? 0.86 + urgencySample * 0.1
+      : deterministicBid
+        ? 0.88 + urgencySample * 0.08
+        : 0.58 + urgencySample * 0.2;
+  const replyTo = addressedByHost && !isBridgePrompt
+    ? 'H'
+    : addressedByHost && isBridgePrompt && bridgeOpponentAlias
+      ? bridgeOpponentAlias
+      : peer?.alias ?? null;
   const replyTarget =
     replyTo && replyTo !== 'H' ? rosterEntry(roster, replyTo) : undefined;
+  const defaultFocus =
+    matchingUnusedArgument?.position ??
+    leastCoveredArgument(topic, speaker, unusedArguments, roster, [
+      ...entries,
+      ...generatedActs
+    ])?.position ??
+    sentencePoint(speaker.stance);
   const focus = replyTarget
-    ? `回应${replyTarget.name}的${sentencePoint(replyTarget.stance).startsWith('担心') ? '担忧' : '看法'}`
-    : sentencePoint(speaker.stance);
+    ? `回应${replyTarget.name}的观点`
+    : addressedByHost
+      ? `回应主持人的追问`
+      : Array.from(defaultFocus).slice(0, 20).join('');
 
   return {
     wantToSpeak: wantsToSpeak,
@@ -891,9 +1164,134 @@ function buildBid(
   };
 }
 
+function quotedClaim(content: string): string | undefined {
+  return content.match(/[“"]([^”"]+)[”"]/u)?.[1];
+}
+
+function asksForDetailKind(
+  content: string,
+  detailKind: MockDetailKind
+): boolean {
+  const unquotedContent = content.replace(/[“"][^”"]+[”"]/gu, '');
+  const cues: Record<MockDetailKind, RegExp> = {
+    example: /例|案例|情形/u,
+    condition: /条件|成立|适用/u,
+    evidence: /记录|证据|核对|检验/u
+  };
+  return cues[detailKind].test(unquotedContent);
+}
+
+interface ExhaustedResponseData {
+  reference: string;
+  detail: string;
+}
+
+const EXHAUSTED_RESPONSE_TEMPLATES: Record<
+  string,
+  readonly TextTemplate<ExhaustedResponseData>[]
+> = {
+  statement: [
+    ({ reference, detail }) => `针对${reference}，我会先核对${detail}。`,
+    ({ reference, detail }) => `沿着${reference}，我想确认${detail}。`,
+    ({ reference, detail }) => `回到${reference}，还需要检查${detail}。`,
+    ({ reference, detail }) => `关于${reference}，我会重点看${detail}。`,
+    ({ reference, detail }) => `结合${reference}，接下来应核实${detail}。`,
+    ({ reference, detail }) => `要回应${reference}，还得把${detail}核清。`
+  ],
+  rebut: [
+    ({ reference, detail }) => `我不同意${reference}，还要核对${detail}。`,
+    ({ reference, detail }) => `回应${reference}，我对${detail}仍有异议。`,
+    ({ reference, detail }) => `关于${reference}，我有异议，关键仍是检验${detail}。`,
+    ({ reference, detail }) => `考虑${reference}，我不赞同忽略${detail}。`,
+    ({ reference, detail }) => `我对${reference}有异议，原因是${detail}。`,
+    ({ reference, detail }) => `围绕${reference}，我有异议，这点还需核清：${detail}。`
+  ],
+  interrupt: [
+    ({ reference, detail }) => `我有异议：${reference}还需核对${detail}。`,
+    ({ reference, detail }) => `回应${reference}，我不同意忽略${detail}。`,
+    ({ reference, detail }) => `针对${reference}，我不赞同跳过${detail}。`,
+    ({ reference, detail }) => `我想立即回应${reference}：我对${detail}有异议。`,
+    ({ reference, detail }) => `对${reference}我有异议，尤其要核验${detail}。`,
+    ({ reference, detail }) => `等一下，我有异议：${reference}还需把${detail}说清。`
+  ],
+  supplement: [
+    ({ reference, detail }) => `沿着${reference}，还应核对${detail}。`,
+    ({ reference, detail }) => `我认同${reference}，补充一点：${detail}。`,
+    ({ reference, detail }) => `针对${reference}，另一个待核对点是${detail}。`,
+    ({ reference, detail }) => `在${reference}基础上，我还想确认${detail}。`,
+    ({ reference, detail }) => `我赞同${reference}，也要检查${detail}。`,
+    ({ reference, detail }) => `承接${reference}，可以进一步核验${detail}。`
+  ]
+};
+
+const NEGATIVE_REFERENCE_TEMPLATES: Record<
+  'rebut' | 'interrupt',
+  readonly TextTemplate<ExhaustedResponseData>[]
+> = {
+  rebut: [
+    ({ reference, detail }) => `针对${reference}，我有异议，先核对${detail}。`,
+    ({ reference, detail }) => `回应${reference}，我有异议，更关键的是${detail}。`,
+    ({ reference, detail }) => `围绕${reference}，我有异议，先把${detail}核清。`,
+    ({ reference, detail }) => `关于${reference}，我有异议，还需要检验${detail}。`,
+    ({ reference, detail }) => `结合${reference}，我有异议，想确认${detail}。`,
+    ({ reference, detail }) => `就${reference}而言，我有异议，下一步应核实${detail}。`
+  ],
+  interrupt: [
+    ({ reference, detail }) => `等一下，我有异议：${reference}还需要核实${detail}。`,
+    ({ reference, detail }) => `我想立即回应${reference}，对${detail}有异议。`,
+    ({ reference, detail }) => `先停一下，我对${reference}有异议，还要看${detail}。`,
+    ({ reference, detail }) => `回应${reference}，我有异议，会把${detail}核清。`,
+    ({ reference, detail }) => `我有异议，先补充核验${reference}涉及的${detail}。`,
+    ({ reference, detail }) => `稍等，我有异议：${reference}的适用条件还要查${detail}。`
+  ]
+};
+
+function exhaustedResponse(
+  act: string,
+  speakerAlias: string,
+  targetName: string,
+  sourceClaim: string | undefined,
+  sourceArgument: MockArgument | undefined,
+  nextTemplateIndex: (scope: string, count: number) => number
+): string {
+  const fallbackDetails = ['适用条件', '前提范围', '实际影响', '核对方式'];
+  const detail =
+    sourceArgument?.detail.text ??
+    fallbackDetails[
+      nextTemplateIndex(
+        `utterance:${act}:exhausted-detail:${speakerAlias}`,
+        fallbackDetails.length
+      )
+    ]!;
+  const containsNegativeReference =
+    /(?:反对|不支持|不赞成|不认同|不赞同|担心|担忧|警惕|质疑)/u.test(
+      sourceClaim ?? detail
+    );
+  const templates =
+    containsNegativeReference &&
+    (act === 'rebut' || act === 'interrupt')
+      ? NEGATIVE_REFERENCE_TEMPLATES[act]
+      :
+    EXHAUSTED_RESPONSE_TEMPLATES[act] ??
+    EXHAUSTED_RESPONSE_TEMPLATES.statement!;
+  const reference = sourceClaim
+    ? `${targetName}刚才说“${sourceClaim}”`
+    : `${targetName}刚才的判断`;
+  const index = nextTemplateIndex(
+    `utterance:${act}:exhausted:${speakerAlias}`,
+    templates.length
+  );
+  return templates[index]?.({ reference, detail }) ?? templates[0]!({
+    reference,
+    detail
+  });
+}
+
 function buildUtterance(
   context: MockContext,
-  nextTemplateIndex: (scope: string, count: number) => number
+  nextTemplateIndex: (scope: string, count: number) => number,
+  nextUtteranceIndex: (speakerAlias: string) => number,
+  generatedActs: readonly MockGeneratedAct[]
 ): string {
   const act = readString(context.act, 'statement');
   const templates = UTTERANCE_TEMPLATES[act] ?? UTTERANCE_TEMPLATES.statement!;
@@ -909,24 +1307,243 @@ function buildUtterance(
   const targetUtterance = targetAlias
     ? mostRecentUtterance(entries, targetAlias)
     : entries.at(-1);
-  const topic = topicCore(readString(context.topic));
+  const topic = readString(context.topic);
+  const argumentList = argumentsForSpeaker(topic, speaker);
+  const utteranceIndex = nextUtteranceIndex(speakerAlias);
+  const firstSpeech = utteranceIndex === 0;
+  const earlierSpeech = [
+    ...entries
+      .filter(({ speakerAlias: alias }) => alias === speakerAlias)
+      .map(({ content }) => content),
+    ...generatedActs
+      .filter(({ speakerAlias: alias }) => alias === speakerAlias)
+      .map(({ content }) => content)
+  ];
+  const unusedArguments = argumentList.filter(
+    ({ claim, text, position, detail }) =>
+      earlierSpeech.every(
+        (content) =>
+          !content.includes(claim) &&
+          !content.includes(text) &&
+          !content.includes(position) &&
+          !content.includes(detail.text)
+      )
+  );
+  const targetName =
+    target?.name ?? targetUtterance?.speakerName ?? '前一位嘉宾';
+  const reference =
+    target && targetUtterance
+      ? positionReferenceForUtterance(topic, target, targetUtterance)
+      : '';
+  const latestHostPrompt = [...entries]
+    .reverse()
+    .find(({ speakerAlias: alias }) => alias === 'H');
+  const bridgePromptTargetAlias = latestHostPrompt
+    ? roster.find(
+        ({ alias, name }) =>
+          isExpertAlias(alias) &&
+          (latestHostPrompt.content.includes(`${name}，`) ||
+            latestHostPrompt.content.includes(`${name}刚才`))
+      )?.alias
+    : undefined;
+  const isBridgeReply = Boolean(
+    target &&
+      target.alias !== 'H' &&
+      latestHostPrompt &&
+      bridgePromptTargetAlias === speakerAlias &&
+      latestHostPrompt.content.includes(target.name) &&
+      /回应/u.test(latestHostPrompt.content) &&
+      !entries.some(
+        ({ seq, speakerAlias: alias }) =>
+          seq > latestHostPrompt.seq && alias === bridgePromptTargetAlias
+      ) &&
+      roster.filter(
+        ({ alias, name }) =>
+          isExpertAlias(alias) && latestHostPrompt.content.includes(name)
+      ).length >= 2
+  );
+  const targetArgument =
+    target && targetUtterance
+      ? positionArgumentForContent(topic, target, targetUtterance.content)
+      : undefined;
+  const followUpQuestion = [...entries].reverse().find((entry) => {
+    if (
+      entry.speakerAlias !== 'H' ||
+      target?.alias !== 'H' ||
+      !entry.content.includes(speaker.name) ||
+      entries.some(
+        ({ seq, speakerAlias: alias }) =>
+          seq > entry.seq && alias === speakerAlias
+      )
+    ) {
+      return false;
+    }
+    const source = latestReply(entries, speakerAlias, entry.seq);
+    const sourceArgument =
+      source && argumentForContent(topic, speaker, source.content);
+    return Boolean(
+      sourceArgument &&
+        quotedClaim(entry.content) === sourceArgument.claim &&
+        asksForDetailKind(entry.content, sourceArgument.detail.kind)
+    );
+  });
+  const followUpSource = followUpQuestion
+    ? latestReply(entries, speakerAlias, followUpQuestion.seq)
+    : undefined;
+  const followUpArgument =
+    followUpSource &&
+    argumentForContent(topic, speaker, followUpSource.content);
+  const followUpDetail = followUpArgument?.detail;
+  const isFollowUpAnswer =
+    act === 'statement' &&
+    Boolean(followUpQuestion && followUpDetail && target?.alias === 'H');
+  const targetedIssue =
+    targetArgument &&
+    ['supplement', 'rebut', 'interrupt'].includes(act)
+      ? targetArgument.issue
+      : undefined;
+  const targetedArgument = targetedIssue
+    ? unusedArguments.find(
+        ({ issue, side }) =>
+          issue === targetedIssue &&
+          (!isBridgeReply || side !== targetArgument?.side)
+      )
+    : undefined;
+  const argument =
+    (isFollowUpAnswer && followUpDetail
+      ? argumentList.find(
+          ({ issue }) =>
+            issue ===
+            argumentForContent(topic, speaker, followUpSource!.content)?.issue
+        )
+      : undefined) ??
+    targetedArgument ??
+    (firstSpeech && act === 'statement'
+      ? leastCoveredArgument(
+          topic,
+          speaker,
+          unusedArguments.filter(
+            ({ issue }) => issue !== argumentList[0]?.issue
+          ),
+          roster,
+          [...entries, ...generatedActs]
+        )
+      : undefined) ??
+    leastCoveredArgument(
+      topic,
+      speaker,
+      unusedArguments,
+      roster,
+      [...entries, ...generatedActs]
+    );
+  if (!argument) {
+    if (target && target.alias !== 'H' && targetUtterance) {
+      return exhaustedResponse(
+        act,
+        speakerAlias,
+        targetName,
+        spokenClaimForContent(topic, target, targetUtterance.content),
+        targetArgument,
+        nextTemplateIndex
+      );
+    }
+    const lastPeer = [...entries]
+      .reverse()
+      .find(({ speakerAlias: alias }) => isExpertAlias(alias) && alias !== speakerAlias);
+    const peer = lastPeer ? rosterEntry(roster, lastPeer.speakerAlias) : undefined;
+    const peerArgument =
+      peer && lastPeer
+        ? argumentForContent(topic, peer, lastPeer.content)
+        : undefined;
+    const peerClaim =
+      peer && lastPeer
+        ? spokenClaimForContent(topic, peer, lastPeer.content)
+        : undefined;
+    if (peer && lastPeer) {
+      return exhaustedResponse(
+        act,
+        speakerAlias,
+        peer.name,
+        peerClaim,
+        peerArgument,
+        nextTemplateIndex
+      );
+    }
+    throw new Error(
+      `Mock speaker ${speakerAlias} has no unused argument or identifiable prior claim`
+    );
+  }
+  const responseArgument: MockArgument = isFollowUpAnswer
+    ? {
+        ...argument,
+        text: followUpDetail!.text
+      }
+    : argument;
   const data: UtteranceTemplateData = {
-    topic,
-    targetName: target?.name ?? targetUtterance?.speakerName ?? '前一位嘉宾',
-    quote:
-      target && targetUtterance
-        ? shortQuote(targetUtterance.content, target, roster, topic)
-        : '',
-    stance: sentencePoint(speaker.stance)
+    firstSpeech,
+    targetIsHost:
+      target?.alias === 'H' || targetUtterance?.speakerAlias === 'H',
+    targetName,
+    reference,
+    stance: speaker.stance,
+    argument: responseArgument
   };
+  if (isFollowUpAnswer) {
+    return `${responseArgument.detail.kind === 'example' ? '具体来说' : responseArgument.detail.kind === 'condition' ? '在这个条件下' : '可以核对'}，${responseArgument.text}`;
+  }
+  if (isBridgeReply && targetArgument) {
+    const targetProfile = profileForSpeaker(topic, target!);
+    const targetClaim =
+      targetProfile &&
+      targetUtterance?.content.includes(targetProfile.stanceClaim)
+        ? targetProfile.stanceClaim
+        : targetArgument.claim;
+    const bridgeReference = `${targetName}刚才说“${targetClaim}”`;
+    const unusedOpposing =
+      argument &&
+      argument.issue === targetArgument.issue &&
+      argument.side !== targetArgument.side
+        ? argument
+        : undefined;
+    if (unusedOpposing) {
+      return `我不同意${bridgeReference}：${unusedOpposing.text}`;
+    }
+    const opposing = argumentList.find(
+      ({ issue, side }) =>
+        issue === targetArgument.issue && side !== targetArgument.side
+    );
+    if (
+      opposing &&
+      earlierSpeech.every((content) => !content.includes(opposing.detail.text))
+    ) {
+      return `我不同意${bridgeReference}，具体要看：${opposing.detail.text}。`;
+    }
+    if (
+      opposing &&
+      earlierSpeech.every((content) => !content.includes(opposing.position))
+    ) {
+      return `我不同意${bridgeReference}：我仍${opposing.position}。`;
+    }
+    return exhaustedResponse(
+      act,
+      speakerAlias,
+      targetName,
+      targetClaim,
+      undefined,
+      nextTemplateIndex
+    );
+  }
   const index = nextTemplateIndex(`utterance:${act}`, templates.length);
-  return (templates[index]?.(data) ?? templates[0]!(data)).replace(/…/gu, '');
+  return templates[index]?.(data) ?? templates[0]!(data);
 }
 
 function parseDivergence(
   context: MockContext,
   roster: readonly MockRosterEntry[]
-): { content: string; sides: Array<{ name: string; position: string }> } {
+): {
+  content: string;
+  sides: Array<{ alias: string; name: string; position: string }>;
+} {
   const raw = context.divergence;
   if (isRecord(raw) && typeof raw.content === 'string') {
     const sides = Array.isArray(raw.stances)
@@ -942,8 +1559,11 @@ function parseDivergence(
           return participant
             ? [
                 {
+                  alias: participant.alias,
                   name: participant.name,
-                  position: sentencePoint(value.position)
+                  position: value.position
+                    .replace(/[。！？!?]+$/u, '')
+                    .trim()
                 }
               ]
             : [];
@@ -962,8 +1582,9 @@ function parseDivergence(
       return participant
         ? [
             {
+                alias: participant.alias,
               name: participant.name,
-              position: sentencePoint(match[2] ?? '')
+                position: (match[2] ?? '').replace(/[。！？!?]+$/u, '').trim()
             }
           ]
         : [];
@@ -989,26 +1610,46 @@ function buildHost(
   const targetUtterance = targetAlias
     ? mostRecentUtterance(entries, targetAlias)
     : undefined;
+  const topic = readString(context.topic);
+  const targetArgument =
+    target && targetUtterance
+      ? argumentForContent(topic, target, targetUtterance.content)
+      : undefined;
   const divergence = parseDivergence(context, roster);
-  const topic = topicCore(readString(context.topic));
+  const divergenceLabel =
+    divergence.content
+      .replace(/^\s*(?:围绕|关于)/u, '')
+      .split(/[：:，,。！？!?；;]/u)[0]
+      ?.trim() || '这个议题';
+  const targetSide = divergence.sides.find(
+    ({ alias }) => alias === targetAlias
+  );
+  const otherSide = targetSide
+    ? divergence.sides.find(({ alias }) => alias !== targetAlias)
+    : undefined;
   const guestList = roster
     .filter(({ alias }) => alias !== 'H')
     .map(({ name, profession, title }) => `${name}（${profession} · ${title}）`)
     .join('、');
   const data: HostTemplateData = {
-    topic,
+    fullTopic: topic || '本场议题',
     guestList: guestList || '嘉宾名单待提供',
     targetName: target?.name ?? '这位嘉宾',
+    targetHasSpoken:
+      context.targetHasSpoken === true || Boolean(targetUtterance),
     profession: target?.profession ?? '专业领域',
-    quote:
+    reference:
       target && targetUtterance
-        ? shortQuote(targetUtterance.content, target, roster, topic)
-        : '',
-    divergence: (divergence.content || topic).replace(/…/gu, ''),
+        ? referenceForUtterance(topic, target, targetUtterance)
+        : '这个问题',
+    detailKind: targetArgument?.detail.kind ?? 'evidence',
+    divergence: divergenceLabel,
+    targetIsInDivergence: Boolean(targetSide),
+    otherName: otherSide?.name ?? '另一方',
     sides: divergence.sides
   };
   const index = nextTemplateIndex(`host:${action}`, templates.length);
-  return (templates[index]?.(data) ?? templates[0]!(data)).replace(/…/gu, '');
+  return templates[index]?.(data) ?? templates[0]!(data);
 }
 
 function insightUtterances(context: MockContext): {
@@ -1031,20 +1672,16 @@ function insightUtterances(context: MockContext): {
 
 function existingDivergenceRef(
   context: MockContext,
-  first: MockRosterEntry,
-  second: MockRosterEntry
+  issue: string
 ): string | null {
   const text = readString(
     context.existingInsightsText,
     readString(context.insightsText)
   );
   const matches = text.split(/\r?\n/u).find((line) => {
-    if (!/^D\d+\b/u.test(line)) {
-      return false;
-    }
-    const hasFirst = line.includes(first.name) || line.includes(first.alias);
-    const hasSecond = line.includes(second.name) || line.includes(second.alias);
-    return hasFirst && hasSecond;
+    const content = line.match(/^D\d+\s+分歧[：:]\s*(.*)$/u)?.[1] ?? '';
+    const existingIssue = content.split(/[：:；;]/u)[0]?.trim();
+    return existingIssue === issue;
   });
   return matches?.match(/^(D\d+)\b/u)?.[1] ?? null;
 }
@@ -1052,8 +1689,10 @@ function existingDivergenceRef(
 function buildInsights(context: MockContext): unknown {
   const roster = readRoster(context);
   const { window, added } = insightUtterances(context);
-  const consensus: Array<Record<string, unknown>> = [];
-  const divergences: Array<Record<string, unknown>> = [];
+  const topic = readString(context.topic);
+  const definitions = topicIssues(topic);
+  const consensus = new Map<string, Record<string, unknown>>();
+  const divergences = new Map<string, Record<string, unknown>>();
 
   for (const utterance of added) {
     const speakerAlias = utterance.speakerAlias;
@@ -1071,120 +1710,131 @@ function buildInsights(context: MockContext): unknown {
       continue;
     }
     const related = latestReply(window, replyToAlias, utterance.seq);
-    const evidence = related
-      ? [related.seq, utterance.seq].sort((left, right) => left - right)
-      : [utterance.seq];
-    const targetPosition = sentencePoint(target.stance);
-    const speakerPosition = sentencePoint(speaker.stance);
-
-    if (utterance.act === 'rebut' || utterance.act === 'interrupt') {
-      divergences.push({
-        ref: existingDivergenceRef(context, speaker, target),
-        content: `${speaker.name}${speakerPosition}，${target.name}则${targetPosition}`,
-        stances: [
-          {
-            who: speakerAlias,
-            position: speakerPosition
-          },
-          {
-            who: replyToAlias,
-            position: targetPosition
-          }
-        ],
+    if (!related) {
+      continue;
+    }
+    const evidence = [related.seq, utterance.seq].sort(
+      (left, right) => left - right
+    );
+    const relatedArgument = insightArgumentForContent(
+      topic,
+      target,
+      related.content
+    );
+    const speakerArgument = insightArgumentForContent(
+      topic,
+      speaker,
+      utterance.content
+    );
+    if (
+      !relatedArgument ||
+      !speakerArgument ||
+      relatedArgument.issue !== speakerArgument.issue
+    ) {
+      continue;
+    }
+    const issue = definitions.find(
+      (definition) => definition.issue === relatedArgument.issue
+    );
+    if (!issue) {
+      continue;
+    }
+    const pair = [speaker, target].sort(
+      (left, right) =>
+        Number(left.alias.slice(1)) - Number(right.alias.slice(1))
+    );
+    const argumentsByAlias = new Map([
+      [speakerAlias, speakerArgument],
+      [replyToAlias, relatedArgument]
+    ]);
+    if (
+      utterance.act === 'supplement' &&
+      speakerArgument.side === relatedArgument.side
+    ) {
+      const accepted = argumentsByAlias.get(pair[0]!.alias) ?? relatedArgument;
+      const key = `${issue.issue}:${pair.map(({ alias }) => alias).join(':')}`;
+      consensus.set(key, {
+        ref: null,
+        content: `${pair[0]!.name}与${pair[1]!.name}都${accepted.position}`,
+        participants: pair.map(({ alias }) => alias),
+        evidence
+      });
+    } else if (
+      (utterance.act === 'rebut' || utterance.act === 'interrupt') &&
+      speakerArgument.side !== relatedArgument.side
+    ) {
+      const stances = pair.flatMap((participant) => {
+        const argument = argumentsByAlias.get(participant.alias);
+        return argument
+          ? [{ who: participant.alias, position: argument.position }]
+          : [];
+      });
+      const sideContent = issue.sides.join('；');
+      const divergenceKey = issue.issue;
+      divergences.set(divergenceKey, {
+        ref: existingDivergenceRef(context, issue.issue),
+        content: `${issue.issue}：${sideContent}`,
+        stances,
         evidence,
         resolved: false
       });
-    } else if (utterance.act === 'supplement') {
-      consensus.push({
-        ref: null,
-        content: `${speaker.name}提出${speakerPosition}，${target.name}认同并补充${targetPosition}`,
-        participants: [replyToAlias, speakerAlias],
-        evidence
-      });
     }
   }
-  return { consensus, divergences };
-}
-
-function readInsightEntries(
-  context: MockContext
-): Array<{ kind: 'consensus' | 'divergence'; content: string }> {
-  return readString(
-    context.insightsText,
-    readString(context.existingInsightsText)
-  )
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .flatMap((line) => {
-      const match = line.match(/^[CD]\d+\s+(共识|分歧)[：:]\s*(.*)$/u);
-      if (!match) {
-        return [];
-      }
-      const content = (match[2] ?? '')
-        .split('（')[0]
-        ?.replace(/…/gu, '')
-        .trim();
-      return content
-        ? [
-            {
-              kind: match[1] === '共识' ? 'consensus' : 'divergence',
-              content
-            } as const
-          ]
-        : [];
-    });
+  return {
+    consensus: [...consensus.values()],
+    divergences: [...divergences.values()]
+  };
 }
 
 function buildSummary(context: MockContext): string {
-  const topic = topicCore(readString(context.topic));
+  const topic = readString(context.topic) || '本场议题';
   const roster = readRoster(context);
   const transcript = transcriptEntries(context);
-  const expertsWhoSpoke = transcript.filter((entry) =>
-    isExpertAlias(entry.speakerAlias)
-  );
-  const spokenByAlias = [
-    ...new Map(
-      expertsWhoSpoke.map((entry) => [entry.speakerAlias, entry])
-    ).values()
-  ];
-  const spokenViews = spokenByAlias.map((entry) => {
-    const participant = rosterEntry(roster, entry.speakerAlias);
-    const name = participant?.name ?? entry.speakerName;
-    return `${name}${sentencePoint(participant?.stance ?? entry.content)}`;
+  const issueSummaries = topicIssues(topic).flatMap((issue) => {
+    const representatives = issue.sides.map((side) => {
+      for (const utterance of transcript) {
+        if (!isExpertAlias(utterance.speakerAlias)) {
+          continue;
+        }
+        const speaker = rosterEntry(roster, utterance.speakerAlias);
+        const profile = speaker && profileForSpeaker(topic, speaker);
+        const argument = profile?.arguments.find(
+          (candidate) =>
+            candidate.issue === issue.issue &&
+            candidate.side === side &&
+            utterance.content.includes(candidate.claim)
+        );
+        if (argument && speaker) {
+          return {
+            name: speaker.name,
+            claim: argument.claim
+          };
+        }
+      }
+      return undefined;
+    });
+    const spokenSides = representatives.filter(
+      (value): value is { name: string; claim: string } => Boolean(value)
+    );
+    return (
+      spokenSides.length === 2 &&
+      new Set(spokenSides.map(({ name }) => name)).size === 2
+    )
+      ? [
+          `${issue.issue}：${spokenSides
+            .map(({ name, claim }) => `${name}认为“${claim}”`)
+            .join('；')}`
+        ]
+      : [];
   });
-  const insightEntries = readInsightEntries(context);
-  const divergences = insightEntries
-    .filter(({ kind }) => kind === 'divergence')
-    .map(({ content }) => content);
-  const consensus = insightEntries
-    .filter(({ kind }) => kind === 'consensus')
-    .map(({ content }) => content);
   const openingParagraph =
-    spokenViews.length > 0
-      ? `关于${topic}，${spokenViews.join('；')}。`
-      : `关于${topic}，讨论仍需要真实发言补充具体判断。`;
-  const divergenceParagraph =
-    divergences.length > 0
-      ? `分歧主要在于：${divergences.join('；')}。`
-      : `接下来仍需梳理不同判断所依据的条件。`;
-  const nextQuestion =
-    divergences[0] !== undefined
-      ? '这处分歧接下来应核实哪些证据与适用边界'
-      : '哪些条件会改变目前的判断';
-  const thirdParagraph =
-    consensus.length > 0
-      ? `共识方面，${consensus.join('；')}。`
-      : `仍待回答的问题是：${nextQuestion}？`;
-  const spokenAliases = new Set(
-    expertsWhoSpoke.map(({ speakerAlias }) => speakerAlias)
-  );
-  const nextGuest = roster.find(
-    ({ alias }) => isExpertAlias(alias) && !spokenAliases.has(alias)
-  );
-  const closingParagraph = nextGuest
-    ? `接下来可以请${nextGuest.name}从${nextGuest.profession}的角度回应：哪些条件会改变判断？感谢各位嘉宾，也感谢观众收看。`
-    : `后续还应核实哪些证据会改变判断？感谢各位嘉宾，也感谢观众收看。`;
-  return `${openingParagraph}\n\n${divergenceParagraph}\n\n${thirdParagraph}\n\n${closingParagraph}`;
+    `今天的话题是“${topic}”。` +
+    '本场讨论先亮出判断，再围绕具体依据展开回应。';
+  const claimsParagraph =
+    issueSummaries.length > 0
+      ? `${issueSummaries.join('。')}。`
+      : '嘉宾尚未就各项议题提出可引用的具体主张。';
+  return `${openingParagraph}\n\n${claimsParagraph}`;
 }
 
 function generateText(
@@ -1192,22 +1842,45 @@ function generateText(
   context: MockContext,
   callIndex: number,
   discussionId: string,
-  nextTemplateIndex: (scope: string, count: number) => number
+  nextTemplateIndex: (scope: string, count: number) => number,
+  nextUtteranceIndex: (speakerAlias: string) => number,
+  generatedActs: readonly MockGeneratedAct[]
 ): string {
+  let output: string;
+  let json = false;
   switch (request.task) {
     case 'lineup':
-      return JSON.stringify(buildLineup(context, request, callIndex));
+      output = JSON.stringify(buildLineup(context, request, callIndex));
+      json = true;
+      break;
     case 'bid':
-      return JSON.stringify(buildBid(context, callIndex, discussionId));
+      output = JSON.stringify(
+        buildBid(context, callIndex, discussionId, generatedActs)
+      );
+      json = true;
+      break;
     case 'utterance':
-      return buildUtterance(context, nextTemplateIndex);
+      output = buildUtterance(
+        context,
+        nextTemplateIndex,
+        nextUtteranceIndex,
+        generatedActs
+      );
+      break;
     case 'host':
-      return buildHost(context, nextTemplateIndex);
+      output = buildHost(context, nextTemplateIndex);
+      break;
     case 'insights':
-      return JSON.stringify(buildInsights(context));
+      output = JSON.stringify(buildInsights(context));
+      json = true;
+      break;
     case 'summary':
-      return buildSummary(context);
+      output = buildSummary(context);
+      break;
   }
+  return json
+    ? normalizeJsonOutput(output)
+    : addCjkLatinSpacing(output, [readString(context.topic)]);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1225,6 +1898,9 @@ export function createMockProvider(opts: {
   const streamDelayMs = Math.max(0, opts.streamDelayMs ?? 30);
   const callCounts = new Map<string, number>();
   const templateCursors = new Map<string, number>();
+  const templateOrders = new Map<string, number[]>();
+  const utteranceCursors = new Map<string, number>();
+  const generatedActsByDiscussion = new Map<string, MockGeneratedAct[]>();
 
   const createResponse = (
     request: LLMRequest & { model: string }
@@ -1235,21 +1911,70 @@ export function createMockProvider(opts: {
     const key = `${request.discussionId ?? 'default'}:${request.task}`;
     const callIndex = callCounts.get(key) ?? 0;
     callCounts.set(key, callIndex + 1);
-    const context = readContext(request.context);
     const discussionId = request.discussionId ?? 'default';
+    const requestContext = readContext(request.context);
+    const targetAlias = readString(requestContext.targetAlias);
+    const context: MockContext = {
+      ...requestContext,
+      targetHasSpoken:
+        request.task === 'host' &&
+        isExpertAlias(targetAlias) &&
+        (utteranceCursors.get(`${discussionId}:${targetAlias}`) ?? 0) > 0
+    };
+    const generatedActs =
+      generatedActsByDiscussion.get(discussionId) ?? [];
     const nextTemplateIndex = (scope: string, count: number): number => {
       const templateKey = `${discussionId}:${scope}`;
       const cursor = templateCursors.get(templateKey) ?? 0;
+      const cycle = Math.floor(cursor / count);
+      const offset = cursor % count;
+      const orderKey = `${templateKey}:${cycle}`;
+      let order = templateOrders.get(orderKey);
+      if (!order) {
+        order = Array.from({ length: count }, (_, index) => index).sort(
+          (left, right) => {
+            const leftHash = createRng(
+              `mock-template-order:${orderKey}:${left}`
+            )();
+            const rightHash = createRng(
+              `mock-template-order:${orderKey}:${right}`
+            )();
+            return leftHash - rightHash || left - right;
+          }
+        );
+        templateOrders.set(orderKey, order);
+      }
       templateCursors.set(templateKey, cursor + 1);
-      return cursor % count;
+      return order[offset] ?? 0;
+    };
+    const nextUtteranceIndex = (speakerAlias: string): number => {
+      const utteranceKey = `${discussionId}:${speakerAlias}`;
+      const cursor = utteranceCursors.get(utteranceKey) ?? 0;
+      utteranceCursors.set(utteranceKey, cursor + 1);
+      return cursor;
     };
     const text = generateText(
       request,
       context,
       callIndex,
       discussionId,
-      nextTemplateIndex
+      nextTemplateIndex,
+      nextUtteranceIndex,
+      generatedActs
     );
+    if (
+      request.task === 'utterance' &&
+      isExpertAlias(context.speakerAlias)
+    ) {
+      generatedActsByDiscussion.set(discussionId, [
+        ...generatedActs,
+        {
+          speakerAlias: context.speakerAlias,
+          act: readString(context.act, 'statement'),
+          content: text
+        }
+      ]);
+    }
     return {
       text,
       promptTokens: Math.ceil((request.system.length + request.user.length) / 4),

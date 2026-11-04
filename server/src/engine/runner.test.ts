@@ -5,19 +5,24 @@ import type { StreamEvent } from '@aps/shared';
 import {
   create as createDiscussion,
   getById,
+  incrementTurnCount,
   updateStatus
 } from '../db/repositories/discussions';
 import { listSince } from '../db/repositories/events';
 import {
-  listByDiscussion as listInsights
+  listByDiscussion as listInsights,
+  replaceAll as replaceInsights
 } from '../db/repositories/insights';
 import {
   listByDiscussion as listParticipants,
   replaceLineup
 } from '../db/repositories/participants';
-import { listByDiscussion as listUtterances } from '../db/repositories/utterances';
+import {
+  insert as insertUtterance,
+  listByDiscussion as listUtterances
+} from '../db/repositories/utterances';
 import { createRng } from '../core/rng';
-import { createTestDb, waitFor } from '../test/helpers';
+import { createTestDb, makeTestInsight, waitFor } from '../test/helpers';
 import { createEventBus } from './eventBus';
 import { DiscussionRunner } from './runner';
 import { createLLMGateway } from '../llm/gateway';
@@ -136,6 +141,101 @@ function makeRunner(options: {
     insightContexts,
     getSummaryCalls: () => summaryCalls
   };
+}
+
+function makeResumedHostRunner(lastHostAct: 'bridge' | 'follow_up') {
+  const discussion = createDiscussion(database, {
+    topic: '新人应先独立排错还是借助助手',
+    expertCount: 4,
+    maxTurns: 12
+  });
+  const id = discussion.id;
+  replaceLineup(
+    database,
+    id,
+    makeLineup().map((participant) => ({
+      ...participant,
+      id: randomUUID()
+    }))
+  );
+  const participants = listParticipants(database, id);
+  const host = participants.find(({ role }) => role === 'host')!;
+  const experts = participants
+    .filter(({ role }) => role === 'expert')
+    .sort((left, right) => left.seat - right.seat);
+  const [first, second, third] = experts;
+  const history = [
+    { participantId: host.id, act: 'opening' as const, replyToParticipantId: null, content: '欢迎讨论新人培养。' },
+    { participantId: first!.id, act: 'statement' as const, replyToParticipantId: null, content: '新人应先独立排查错误。' },
+    { participantId: second!.id, act: 'rebut' as const, replyToParticipantId: first!.id, content: '我反对完全禁止助手参与。' },
+    { participantId: third!.id, act: 'supplement' as const, replyToParticipantId: second!.id, content: '可以给新人保留练习时间。' },
+    { participantId: host.id, act: lastHostAct, replyToParticipantId: first!.id, content: '双方对练习顺序有不同判断。' },
+    { participantId: first!.id, act: 'statement' as const, replyToParticipantId: null, content: '先独立完成一次排错更能暴露问题。' },
+    { participantId: second!.id, act: 'rebut' as const, replyToParticipantId: first!.id, content: '需要提供及时求助的入口。' },
+    { participantId: third!.id, act: 'supplement' as const, replyToParticipantId: second!.id, content: '每次练习后都应安排复盘。' }
+  ];
+  history.forEach((utterance, index) => {
+    insertUtterance(database, id, {
+      ...utterance,
+      seq: index + 1
+    });
+  });
+  for (let index = 0; index < 7; index += 1) {
+    incrementTurnCount(database, id);
+  }
+  replaceInsights(database, id, [
+    makeTestInsight({
+      id: randomUUID(),
+      discussionId: id,
+      kind: 'divergence',
+      status: 'active',
+      content: '新人要不要独立排错：练习顺序与求助条件',
+      stances: [
+        { participantId: first!.id, position: '主张先独立排错' },
+        { participantId: second!.id, position: '主张及时提供求助' }
+      ],
+      evidenceSeqs: [6, 7],
+      updatedAtSeq: 7,
+      createdAt: '2026-06-03T00:00:00.000Z',
+      updatedAt: '2026-06-03T00:00:00.000Z'
+    })
+  ]);
+  updateStatus(database, id, 'live');
+
+  const bus = createEventBus(database);
+  const mockProvider = createMockProvider({
+    latencyMs: 0,
+    streamDelayMs: 0
+  });
+  const hostActions: Array<{ action: unknown; targetAlias: unknown }> = [];
+  const provider: LLMProvider = {
+    name: mockProvider.name,
+    complete: (request) => mockProvider.complete(request),
+    async *stream(request) {
+      if (request.task === 'host') {
+        const context = readPromptContext(request.context);
+        hostActions.push({
+          action: context.action,
+          targetAlias: context.targetAlias
+        });
+      }
+      yield* mockProvider.stream(request);
+    }
+  };
+  const gateway = createLLMGateway({
+    provider,
+    models: { quality: 'quality-model', fast: 'fast-model' },
+    maxConcurrency: 6
+  });
+  const runner = new DiscussionRunner(
+    database,
+    bus,
+    gateway,
+    { maxTurns: 12, pacingMs: 0 },
+    id,
+    createRng(`resume-${lastHostAct}`)
+  );
+  return { runner, bus, id, hostActions, experts };
 }
 
 function collectEvents(
@@ -748,6 +848,54 @@ describe('DiscussionRunner', () => {
       )
     ).toBe(true);
   });
+
+  it.each([
+    {
+      previousAct: 'bridge' as const,
+      expectedAct: 'follow_up',
+      expectedTarget: 'E3'
+    },
+    {
+      previousAct: 'follow_up' as const,
+      expectedAct: 'bridge',
+      expectedTarget: 'E1'
+    }
+  ])(
+    '重启后从最近的 $previousAct 恢复主持人交替策略',
+    async ({ previousAct, expectedAct, expectedTarget }) => {
+      const { runner, bus, id, hostActions } =
+        makeResumedHostRunner(previousAct);
+      const unsubscribe = bus.subscribe(id, ({ event }) => {
+        if (
+          event.type === 'utterance.completed' &&
+          event.utterance.seq > 8 &&
+          (event.utterance.act === 'bridge' ||
+            event.utterance.act === 'follow_up')
+        ) {
+          runner.stop();
+        }
+      });
+      runner.start();
+      await runner.done;
+      unsubscribe();
+
+      expect(hostActions[0]).toEqual({
+        action: expectedAct,
+        targetAlias: expectedTarget
+      });
+      const hostUtterance = listUtterances(database, id)
+        .filter(
+          ({ seq, act, participantId }) =>
+            seq > 8 &&
+            participantId ===
+              listParticipants(database, id).find(({ role }) => role === 'host')
+                ?.id &&
+            (act === 'bridge' || act === 'follow_up')
+        )
+        .at(-1);
+      expect(hostUtterance?.act).toBe(expectedAct);
+    }
+  );
 
   it('专家正文发言至少覆盖两种发言行为', async () => {
     const { runner, id } = makeRunner({

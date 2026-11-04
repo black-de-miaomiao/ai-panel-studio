@@ -55,6 +55,7 @@ function context(
     maxTurns: 8,
     expertCount: 4,
     insights: [],
+    lastInterventionAct: null,
     ...overrides
   };
 }
@@ -125,6 +126,45 @@ describe('decideHostAction', () => {
     expect(result).toEqual({ action: 'bridge', targetParticipantId: 'e3' });
   });
 
+  it('最近一次主持插话是 bridge 且上一条来自专家时改为追问', () => {
+    expect(
+      decideHostAction(
+        context({
+          expertTurnsSinceHost: HOST_INTERVAL,
+          lastInterventionAct: 'bridge',
+          lastSpeakerId: 'e3',
+          insights: [divergence('active', 10, ['e1', 'e2'])]
+        })
+      )
+    ).toEqual({ action: 'follow_up', targetParticipantId: 'e3' });
+  });
+
+  it('最近一次主持插话是 follow_up 时有活跃分歧则串联', () => {
+    expect(
+      decideHostAction(
+        context({
+          expertTurnsSinceHost: HOST_INTERVAL,
+          lastInterventionAct: 'follow_up',
+          lastSpeakerId: 'e3',
+          insights: [divergence('active', 10, ['e2', 'e3'])]
+        })
+      )
+    ).toEqual({ action: 'bridge', targetParticipantId: 'e2' });
+  });
+
+  it('没有上次主持插话时保持活跃分歧优先串联', () => {
+    expect(
+      decideHostAction(
+        context({
+          expertTurnsSinceHost: HOST_INTERVAL,
+          lastInterventionAct: null,
+          lastSpeakerId: 'e3',
+          insights: [divergence('active', 10, ['e2', 'e3'])]
+        })
+      )
+    ).toEqual({ action: 'bridge', targetParticipantId: 'e2' });
+  });
+
   it('达到主持人间隔但没有活跃分歧时追问上一位专家', () => {
     expect(
       decideHostAction(
@@ -138,6 +178,19 @@ describe('decideHostAction', () => {
         })
       )
     ).toEqual({ action: 'follow_up', targetParticipantId: 'e3' });
+  });
+
+  it('最近一次 bridge 后若上一条不是专家发言则交还专家出价', () => {
+    expect(
+      decideHostAction(
+        context({
+          expertTurnsSinceHost: HOST_INTERVAL,
+          lastInterventionAct: 'bridge',
+          lastSpeakerId: 'host',
+          insights: [divergence('active', 10, ['e2', 'e3'])]
+        })
+      )
+    ).toEqual({ action: 'experts' });
   });
 
   it('达到专家人数加一轮后邀请座位最小的未发言专家', () => {

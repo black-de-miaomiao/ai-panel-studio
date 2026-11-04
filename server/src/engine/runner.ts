@@ -472,9 +472,30 @@ export class DiscussionRunner {
   }
 
   private async runRound(context: RunnerContext): Promise<void> {
+    const participantById = new Map(
+      context.participants.map((participant) => [
+        participant.id,
+        participant
+      ])
+    );
+    const lastIntervention = [...context.utterances]
+      .reverse()
+      .find((utterance) => {
+        const participant = participantById.get(utterance.participantId);
+        return (
+          participant?.role === 'host' &&
+          (utterance.act === 'bridge' || utterance.act === 'follow_up')
+        );
+      });
+    const lastInterventionAct =
+      lastIntervention?.act === 'bridge' ||
+      lastIntervention?.act === 'follow_up'
+        ? lastIntervention.act
+        : null;
     const decision = decideHostAction({
       participants: context.participants,
       lastSpeakerId: this.lastSpeakerId,
+      lastInterventionAct,
       expertTurnsSinceHost: this.expertTurnsSinceHost,
       noBidders: this.noBidders,
       turnCount: context.discussion.turnCount,

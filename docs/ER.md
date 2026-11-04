@@ -293,4 +293,4 @@ WHERE discussion_id = ?
 ORDER BY seq ASC;
 ```
 
-首连的 `since` 来自 `snapshot.lastEventSeq`。若请求包含 `Last-Event-ID`，服务端优先使用该值；补发完成后再订阅对应讨论的实时频道。每个事件的 `payload` JSON 与写库前广播的 SSE `data` 完全相同。
+首连的 `since` 来自 `snapshot.lastEventSeq`。若请求包含 `Last-Event-ID`，服务端优先使用该值。新连接先订阅对应讨论的实时频道并缓冲到达事件，再查询并发送 `seq` 大于游标的持久事件；随后冲刷缓冲区，跳过已发送的持久序号并转发其余事件，最后切换为直接推送。每个事件的 `payload` JSON 与写库前广播的 SSE `data` 完全相同。

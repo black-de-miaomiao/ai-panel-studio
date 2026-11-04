@@ -128,7 +128,7 @@
 | `StudioDesktopPanel` | snapshot、洞察更新版本、返回回调 | live/paused 仅洞察；总结中/结束后总结与洞察切换、计数跳转 |
 | `SummaryPanel` / `SummaryPanelFooter` | status、summary、insights、导出/切换/返回回调 | 总结中流式、结束后段落、可切换计数、始终可见操作 |
 | `ConnectionBadge` | `connecting/open/reconnecting` | 中文连接状态、不同色点 |
-| `LobbyPage` | mock API 数据与筛选状态 | 分组大厅、空状态 |
+| `LobbyPage` | 真实讨论 API 列表（页面可见时每 5 秒刷新）与筛选状态 | 分组大厅、加载/错误/空状态 |
 | `NewDiscussionPage` | 表单、生成与阵容确认状态 | 输入、骨架、确认阵容、失败可重试 |
 | `StudioPage` | discussion id、snapshot、事件源 | 实时直播、窄屏 Tab、总结回放 |
 

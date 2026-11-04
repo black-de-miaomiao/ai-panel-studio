@@ -10,6 +10,7 @@ export type HostPolicyParticipant = Pick<
 export interface HostPolicyContext {
   participants: readonly HostPolicyParticipant[];
   lastSpeakerId: string | null;
+  lastInterventionAct: 'bridge' | 'follow_up' | null;
   expertTurnsSinceHost: number;
   noBidders: boolean;
   turnCount: number;
@@ -60,6 +61,14 @@ export function decideHostAction(ctx: HostPolicyContext): HostDecision {
   }
 
   if (ctx.expertTurnsSinceHost >= HOST_INTERVAL) {
+    if (
+      ctx.lastInterventionAct === 'bridge' &&
+      ctx.lastSpeakerId &&
+      experts.some(({ id }) => id === ctx.lastSpeakerId)
+    ) {
+      return { action: 'follow_up', targetParticipantId: ctx.lastSpeakerId };
+    }
+
     const latestActiveDivergence = ctx.insights
       .filter(
         (insight) =>

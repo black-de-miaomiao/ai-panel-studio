@@ -42,7 +42,7 @@ flowchart LR
 | `web/src/state` | 当前讨论、快照、实时事件与页面状态管理。 |
 | `web/src/components` | 嘉宾卡片、专家状态小窗、Transcript、洞察等可复用视图。 |
 | `web/src/pages` | 首页大厅、阵容确认、演播厅与回看页面。 |
-| `e2e/` | Playwright 系统级流程测试，使用 mock 大模型保证确定性。 |
+| `e2e/`（规划目录） | Playwright 系统级流程测试计划；在当前实现快照中目录与配置尚未建立，待第二部分 B 补齐。 |
 
 前端在浏览器中只持有 API 响应和公开讨论内容，不加载后端密钥，不访问模型服务地址。
 
@@ -287,7 +287,8 @@ stateDiagram-v2
 0. 上一轮无人出价（`noBidders`）：返回 `invite`，目标是 `speakCount` 最少的专家，并列取 seat 最小者。即使上一条发言来自主持人（例如开场后首轮无人出价）也优先适用：点名本身是一条正文发言，且被点名者在下一轮出价中必然成为候选，从而保证主循环总能推进。
 1. 上一条发言来自主持人：`{ action: 'experts' }`。
 2. `expertTurnsSinceHost ≥ HOST_INTERVAL`（3）：
-   - 存在 active 分歧且其 `stances` 含 ≥ 2 名专家：先取 `updatedAtSeq` 最大的那条分歧，返回 `bridge`，再选取该分歧中不是上一位发言人且 `speakCount` 最少的专家，并列取 seat 最小者。
+   - 最近一次 bridge / follow_up 插话是 `bridge`，且上一条正文来自专家：返回 `follow_up`，目标为上一位专家发言人。
+   - 否则，存在 active 分歧且其 `stances` 含 ≥ 2 名专家：先取 `updatedAtSeq` 最大的那条分歧，返回 `bridge`，再选取该分歧中不是上一位发言人且 `speakCount` 最少的专家，并列取 seat 最小者。
    - 否则返回 `follow_up`，目标为上一位专家发言人。
 3. 存在 `speakCount = 0` 的专家且 `turnCount ≥ expertCount + 1`：返回 `invite` 该专家；多人未发言时取 seat 最小者。
 4. 以上均不满足：返回 `{ action: 'experts' }`。
@@ -387,10 +388,10 @@ stateDiagram-v2
 
 | 层 | 规格 |
 |---|---|
-| Monorepo | npm workspaces：`shared/`（`@aps/shared`）、`server/`（`@aps/server`）、`web/`（`@aps/web`）、`e2e/`（Playwright）。 |
+| Monorepo | npm workspaces 目前只有 `shared/`（`@aps/shared`）、`server/`（`@aps/server`）、`web/`（`@aps/web`）。 |
 | 后端 | Node.js ≥ 22.13、TypeScript、Express 5、zod、`node:sqlite` 的 `DatabaseSync`、SSE。默认端口 `8787`。 |
 | 前端 | React 19、Vite、TypeScript、Tailwind CSS v4、React Router 7、lucide-react。开发端口 `5173`；`/api` 代理到后端，同源访问无需 CORS。 |
-| 测试 | Vitest（单元/集成）、supertest、Playwright（E2E，使用 mock 大模型保证确定性）。 |
+| 测试 | Vitest（单元/集成）、supertest；根包已声明 Playwright 依赖和 `test:e2e` 脚本，但 `playwright.config.*` 与 `e2e/` 尚未建立（第二部分 B 补齐）。 |
 | 持久化 | SQLite；数据库列 `snake_case`，API 与共享契约 `camelCase`。 |
 
 ### 6.2 网关契约与路由
@@ -746,7 +747,7 @@ JSON 输出：
 | 连续发言失败 | 发言失败轮次与“全部出价失败”轮次共用一个连续失败计数，任一条发言成功即清零。连续 3 轮失败后状态转为 `paused`，`error_message` 写「大模型服务暂时不可用，讨论已暂停，可稍后继续」。 |
 | 洞察提炼 | 失败记日志；下次触发时把遗漏的发言一并处理，不阻塞主循环。 |
 | 主持人总结 | 失败重试 1 次；仍失败时根据当前共识/分歧用代码模板生成自然语言兜底总结。 |
-| 阵容生成 | JSON 解析或校验失败时将错误原因反馈给模型再试 1 次；仍失败则讨论为 `failed`，接口返回 `502 LLM_ERROR`。 |
+| 阵容生成 | JSON 解析或校验失败时将错误原因反馈给模型再试 1 次；最终失败时，创建讨论或从 `failed` 重新生成会保持/进入 `failed`，从 `lineup_ready` 换一批则保留原阵容与状态、不追加事件；两种情况均返回 `502 LLM_ERROR`。 |
 | 模型服务请求 | 网络错误、429、5xx 按 LLM 网关规则重试 1 次，退避 800ms；quality 90 秒、fast 30 秒超时。 |
 
 ### 8.3 暂停与启动恢复
