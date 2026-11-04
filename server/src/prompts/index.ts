@@ -196,7 +196,20 @@ function renderInsightUtterances(
     const replyLabel = utterance.replyToAlias
       ? `${utterance.replyToAlias} ${replyTo?.name ?? '未知对象'}`
       : '无';
-    return `#${utterance.seq} ${utterance.speakerAlias} ${speakerName}（${utterance.act}，回应${replyLabel}）：${safeText(utterance.content)}`;
+    // 立场关系仅供模型参考：承接同向立场的前提更可能构成局部共识。
+    // 主持人与无回应对象的发言不标注，避免无意义的关系推断。
+    const relation =
+      utterance.replyToAlias &&
+      utterance.replyToAlias !== 'H' &&
+      utterance.speakerAlias !== 'H' &&
+      speaker &&
+      replyTo
+        ? `（发言人与回应对象立场关系：${stanceRelation(
+            speaker.stanceTag,
+            replyTo.stanceTag
+          )}）`
+        : '';
+    return `#${utterance.seq} ${utterance.speakerAlias} ${speakerName}（${utterance.act}，回应${replyLabel}）：${safeText(utterance.content)}${relation}`;
   });
   return entries.length > 0 ? entries.join('\n') : '（暂无发言记录）';
 }
@@ -565,14 +578,43 @@ function hostGuidance(action: HostAct): string {
     case 'opening':
       return '开场最多3句：欢迎观众并点出话题核心矛盾；必须另用一句按嘉宾名单顺序逐一说出所有嘉宾姓名和职业、Title，不得用“几个领域”等概括代替名单。不指定由谁先发言，第一位发言者由嘉宾举手决定。';
     case 'follow_up':
-      return '针对目标专家最近的发言追问一个更具体或更尖锐的问题。';
+      return '针对目标专家最近的发言追问一个更具体或更尖锐的问题；问法不得与本场已问过的提问重复。';
     case 'bridge':
-      return '点明某个分歧中双方的不同，请目标专家回应另一方。';
+      return '点明某个分歧中双方的不同，请目标专家回应另一方；每次串联换一种问法，不得重复本场已问过的提问。';
     case 'invite':
-      return '点名尚未充分发言的专家，结合其专业背景提出一个具体问题。';
+      return '点名尚未充分发言的专家，结合其专业背景提出一个具体问题；问法不得与本场已问过的提问重复。';
     case 'closing':
       return '简短结束当前主持动作；完整的多段总结应使用 summary 任务。';
   }
+}
+
+/**
+ * 从转录窗口提取主持人已发出过的提问：同一场内主持插话不得复用这些问句。
+ * 只取含问号的发言（开场白通常不是提问）；窗口之外更早的提问由 system 中的
+ * 不复用规则覆盖，Runner 传入的窗口本身只有最近 10 条。
+ */
+function previousHostQuestions(transcriptWindow: string): {
+  seq: number;
+  content: string;
+}[] {
+  return transcriptWindow
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .flatMap((line) => {
+      const match = /^#(\d+)\s+H\s+/u.exec(line);
+      if (!match) {
+        return [];
+      }
+      const separator = line.indexOf('：');
+      if (separator < 0) {
+        return [];
+      }
+      const content = line.slice(separator + 1).trim();
+      if (!content || !/[？?]/u.test(content)) {
+        return [];
+      }
+      return [{ seq: Number(match[1]), content }];
+    });
 }
 
 export function buildHostPrompt(
@@ -609,6 +651,13 @@ export function buildHostPrompt(
   ]
     .filter(Boolean)
     .join('\n');
+  const askedQuestions = previousHostQuestions(base.transcriptWindow);
+  const askedQuestionsText =
+    askedQuestions.length > 0
+      ? `本场主持人已问过的提问（不得原句重复，也不得只更换专家姓名）：\n${askedQuestions
+          .map(({ seq, content }) => `- #${seq} ${content}`)
+          .join('\n')}`
+      : '本场主持人尚未提问。';
   const context = {
     ...base,
     hostRoleCard,
@@ -619,8 +668,12 @@ export function buildHostPrompt(
       input.action === 'bridge' ? divergenceText : null,
     instruction: hostGuidance(input.action)
   };
+  const noRepeatRule =
+    input.action === 'opening'
+      ? ''
+      : '\n同一场内主持人的插话提问两两不同：对照本场主持人已问过的提问，换一个具体问法或换一个角度，不得原句重复，也不得只更换专家姓名。';
   const system = `你是中文电视圆桌节目的主持人，只负责推进讨论，不表达个人立场。根据真实发言追问、串联或点名；不编造嘉宾身份和讨论内容。语气简洁、自然，口语化，不用 Markdown，不写动作或括号旁白，不加姓名前缀。最多${sentenceLimit}句。
-${hostGuidance(input.action)}`;
+${hostGuidance(input.action)}${noRepeatRule}`;
   const user = `话题：${topicBlock(base.topic)}
 主持人角色卡：${roleCardJson(hostRoleCard)}
 阵容名册：
@@ -632,7 +685,7 @@ ${base.transcriptWindow}
 本次主持动作：${input.action}；目标别名：${input.targetAlias ? safeText(input.targetAlias) : '无'}。
 别名表：${base.aliasTable.join('；')}。
 ${actionContext}
-${hostGuidance(input.action)} 请只依据以上上下文，用中文输出最多${sentenceLimit}句，不表达个人立场。`;
+${input.action === 'opening' ? '' : `${askedQuestionsText}\n`}${hostGuidance(input.action)} 请只依据以上上下文，用中文输出最多${sentenceLimit}句，不表达个人立场。`;
   return makeParts(system, user, context);
 }
 
@@ -681,7 +734,7 @@ export function buildInsightsPrompt(input: {
   };
   const transcriptText = renderInsightUtterances(transcriptWindow, roster);
   const utteranceText = renderInsightUtterances(newUtterances, roster);
-  const system = `你是节目实时字幕编辑，只返回新增或变化的共识与分歧，不重复未变化条目。宁缺毋滥：只有明确的认同或明确的对立才记录；一旦发言明确表达认同或对立，就必须记录。共识必须至少有两位专家在发言中明确表达认同；立场标签相同本身不算认同。局部共识可以与同一议题中的分歧并存，不要因整体议题仍有分歧而省略局部认同。每条 supplement 都要检查是否明确承接上一位专家认可的前提或方案后再增加条件；若明确承接，就记录双方共同认可的有限前提，并引用双方真实发言 seq。认同一个前提不代表认同对方所有结论。rebut 或明确说“不同意”构成分歧；分歧必须至少包含两位立场明确不同的专家。若同一批真实发言同时支持局部共识和分歧，两类都应记录。围绕同一问题的同一对专家反复交锋时，使用已有 ref 更新同一条分歧，不新建重复条目；不同争点分别记录，但不得为达到条数而拆分或制造洞察。只有双方都明确靠拢时 resolved 才能为 true。主持人不能作为参与者。evidence 可引用最近发言窗口或本次新增发言中任何真实 seq，不限于新增发言；不能编造。
+  const system = `你是节目实时字幕编辑，只返回新增或变化的共识与分歧，不重复未变化条目。宁缺毋滥：只有明确的认同或明确的对立才记录；一旦发言明确表达认同或对立，就必须记录。共识必须至少有两位专家在发言中明确表达认同；立场标签相同本身不算认同。局部共识可以与同一议题中的分歧并存，不要因整体议题仍有分歧而省略局部认同。当一位专家在发言中承接、认同或补充另一位专家某条论据的前提（而不是反驳该论据或其他观点）时，即使两人措辞不同、没有明说同意，也必须产生一条 consensus 条目：content 只概括双方共同认可的那一条有限前提，participants 写两位专家别名，evidence 引用双方真实发言 seq。每条 supplement 都要检查是否明确承接上一位专家认可的前提或方案后再增加条件；若明确承接，就记录双方共同认可的有限前提，并引用双方真实发言 seq。认同一个前提不代表认同对方所有结论，不得把单条前提的共识扩大成全议题一致。rebut 或明确说“不同意”构成分歧；分歧必须至少包含两位立场明确不同的专家。若同一批真实发言同时支持局部共识和分歧，两类都应记录。围绕同一问题的同一对专家反复交锋时，使用已有 ref 更新同一条分歧，不新建重复条目；不同争点分别记录，但不得为达到条数而拆分或制造洞察。只有双方都明确靠拢时 resolved 才能为 true。主持人不能作为参与者。evidence 可引用最近发言窗口或本次新增发言中任何真实 seq，不限于新增发言；不能编造。
 只输出 JSON，不加解释或 Markdown。结构为 {"consensus":[{"ref":"C1或null","content":"最多80字的一句概括","participants":["E1","E2"],"evidence":[1,2]}],"divergences":[{"ref":"D1或null","content":"最多80字的一句概括","stances":[{"who":"E1","position":"最多40字"},{"who":"E2","position":"最多40字"}],"evidence":[1,2],"resolved":false}]}。所有字段必须存在；没有新增条目时对应数组为空。`;
   const user = `话题：${topicBlock(topic)}
 别名表：${context.aliasTable.join('；') || '（暂无专家别名）'}
@@ -693,6 +746,7 @@ ${currentInsights}
 ${transcriptText}
 本次新增真实发言：
 ${utteranceText || '（没有新增发言）'}
+发言按时间正序排列，窗口最后一条是上一条发言；括注的“发言人与回应对象立场关系”只是按立场标签得出的粗略方向，供参考，判断以发言原文为准：承接对方前提的补充通常构成局部共识，反驳或明确不同意构成分歧。
 请结合发言窗口和本次新增发言返回新增或变化的洞察 JSON；evidence 序号可来自以上任一条真实发言。`;
   return makeParts(system, user, context);
 }
