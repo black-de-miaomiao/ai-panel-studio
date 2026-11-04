@@ -2,6 +2,8 @@
 
 本地运行的 AI 圆桌讨论 Web 应用：输入话题，生成主持人与专家阵容，确认后在演播厅实时观看观点交锋、共识与分歧更新。
 
+**源码仓库（公开）**：https://github.com/black-de-miaomiao/ai-panel-studio
+
 ## 产品截图
 
 以下为 Playwright E2E 在 mock 大模型下跑通完整流程后留存的截图（桌面 1440×900、窄屏 390×844）。除大厅一张为本阶段验证运行时自采外，其余原图保存在仓库外 `_review\e2e\`，仓库内副本在 `docs/images/`：
