@@ -50,10 +50,11 @@ function nowIso(): string {
 
 export function create(
   database: DatabaseSync,
-  input: CreateDiscussionInput
+  input: CreateDiscussionInput,
+  idGenerator?: () => string
 ): Discussion {
   const now = nowIso();
-  const id = randomUUID();
+  const id = idGenerator ? idGenerator() : randomUUID();
 
   database
     .prepare(

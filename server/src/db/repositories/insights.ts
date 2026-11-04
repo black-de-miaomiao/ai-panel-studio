@@ -13,12 +13,14 @@ export function listByDiscussion(
   database: DatabaseSync,
   discussionId: string
 ): Insight[] {
+  // 立场按座位排序（而不是按随机 UUID），保证同一场讨论的展示顺序稳定；
+  // 同毫秒创建的洞察按写入顺序（rowid）排序，保证 C/D 编号可复现。
   const insightRows = database
     .prepare(
       `SELECT *
          FROM insights
         WHERE discussion_id = ?
-        ORDER BY created_at ASC, id ASC`
+        ORDER BY created_at ASC, rowid ASC`
     )
     .all(discussionId) as unknown as InsightRow[];
 
@@ -31,8 +33,9 @@ export function listByDiscussion(
       `SELECT s.insight_id, s.participant_id, s.position
          FROM insight_stances AS s
          JOIN insights AS i ON i.id = s.insight_id
+         JOIN participants AS p ON p.id = s.participant_id
         WHERE i.discussion_id = ?
-        ORDER BY s.participant_id ASC`
+        ORDER BY p.seat ASC`
     )
     .all(discussionId) as unknown as InsightStanceRow[];
   const stancesByInsight = new Map<string, InsightStance[]>();

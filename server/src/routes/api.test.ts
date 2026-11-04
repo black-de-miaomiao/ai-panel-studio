@@ -10,6 +10,7 @@ import {
   type StreamEvent
 } from '@aps/shared';
 import { createApp } from '../app';
+import { deterministicUuid } from '../core/deterministicIds';
 import {
   create as createDiscussion,
   getById,
@@ -100,13 +101,15 @@ function createTestApp(options: {
   failOnLineup?: boolean;
   llm?: LLMGateway;
   database?: DatabaseSync;
+  testDiscussionIdSeed?: string | null;
 } = {}) {
   const testDatabase = options.database ?? database;
   const config = createTestConfig({
     llm: {
       apiKey: fakeApiKey,
       provider: 'mock'
-    }
+    },
+    testDiscussionIdSeed: options.testDiscussionIdSeed ?? null
   });
   const llm: LLMGateway =
     options.llm ??
@@ -332,6 +335,32 @@ describe('讨论 REST API', () => {
           participant.avatar === participant.name[0]
       )
     ).toBe(true);
+  });
+
+  it('设置测试种子后创建使用可复现的讨论 ID', async () => {
+    const seededApp = createTestApp({
+      database: createTestDb({ seed: true }),
+      testDiscussionIdSeed: 'e2e-fixed'
+    });
+    const topic = '可复现讨论';
+    const first = await request(seededApp)
+      .post('/api/discussions')
+      .send({ topic, expertCount: 3 });
+    const second = await request(seededApp)
+      .post('/api/discussions')
+      .send({ topic, expertCount: 3 });
+
+    const expectedId = deterministicUuid('e2e-fixed', topic, 0);
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(first.body.snapshot.discussion.id).toBe(expectedId);
+    // 同一话题重复创建时递增序号，避免主键冲突。
+    expect(second.body.snapshot.discussion.id).toBe(
+      deterministicUuid('e2e-fixed', topic, 1)
+    );
+    expect(second.body.snapshot.discussion.id).not.toBe(
+      first.body.snapshot.discussion.id
+    );
   });
 
   it('列表包含新讨论和结构性种子记录并按状态排序且支持 ended 过滤', async () => {

@@ -3,7 +3,8 @@ import { makeTestInsight, makeTestParticipant, makeTestUtterance } from '../test
 import {
   buildAliasMap,
   buildTranscriptWindow,
-  formatInsightsForPrompt
+  formatInsightsForPrompt,
+  insightsInCreatedOrder
 } from './context';
 
 const host = makeTestParticipant({
@@ -134,5 +135,32 @@ describe('formatInsightsForPrompt', () => {
     expect(text).toContain('支持低风险试点');
     expect(text).toContain('反对复杂问题全自动化');
     expect(text).toContain('（已化解）');
+  });
+});
+
+describe('insightsInCreatedOrder', () => {
+  it('同毫秒创建的洞察按数组写入顺序编号，与提示词 C/D 编号一致', () => {
+    const sameCreatedAt = '2026-01-01T00:00:05.000Z';
+    const first = makeTestInsight({
+      id: 'divergence-first',
+      kind: 'divergence',
+      content: '先写入的分歧。',
+      createdAt: sameCreatedAt
+    });
+    const second = makeTestInsight({
+      id: 'divergence-second',
+      kind: 'divergence',
+      content: '后写入的分歧。',
+      createdAt: sameCreatedAt
+    });
+
+    // 故意用与 ID 字典序相反的顺序传入，编号必须跟随数组顺序而不是随机 ID。
+    expect(insightsInCreatedOrder([second, first], 'divergence')).toEqual([
+      second,
+      first
+    ]);
+    expect(formatInsightsForPrompt([second, first], [host, expert1, expert2])).toContain(
+      'D1 分歧：后写入的分歧。'
+    );
   });
 });

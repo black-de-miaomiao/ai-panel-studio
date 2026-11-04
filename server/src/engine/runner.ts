@@ -18,6 +18,7 @@ import { normalizeBid, type NormalizedBid } from '../core/bid';
 import {
   buildAliasMap,
   buildTranscriptWindow,
+  insightsInCreatedOrder,
   type AliasMap
 } from '../core/context';
 import { decideHostAction } from '../core/hostPolicy';
@@ -192,13 +193,6 @@ function persistDurableEvent(
 ): EventEnvelope {
   const seq = appendInTransaction(database, event.discussionId, event);
   return { event, seq };
-}
-
-function compareCreated(left: Insight, right: Insight): number {
-  return (
-    left.createdAt.localeCompare(right.createdAt) ||
-    left.id.localeCompare(right.id)
-  );
 }
 
 export class DiscussionRunner {
@@ -807,9 +801,10 @@ export class DiscussionRunner {
     if (!targetAlias) {
       return undefined;
     }
-    const matchingDivergences = context.insights
-      .filter((insight) => insight.kind === 'divergence')
-      .toSorted(compareCreated);
+    const matchingDivergences = insightsInCreatedOrder(
+      context.insights,
+      'divergence'
+    );
     const refIndex = matchingDivergences.findIndex(
       (insight) => insight.id === divergence.id
     );
@@ -1529,12 +1524,11 @@ export class DiscussionRunner {
       const refs: Record<string, string> = {};
       for (const kind of ['consensus', 'divergence'] as const) {
         const prefix = kind === 'consensus' ? 'C' : 'D';
-        context.insights
-          .filter((insight) => insight.kind === kind)
-          .toSorted(compareCreated)
-          .forEach((insight, index) => {
+        insightsInCreatedOrder(context.insights, kind).forEach(
+          (insight, index) => {
             refs[`${prefix}${index + 1}`] = insight.id;
-          });
+          }
+        );
       }
       const merged = mergeInsights(context.insights, patch, {
         discussionId: this.discussionId,

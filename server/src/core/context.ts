@@ -57,6 +57,25 @@ export function buildTranscriptWindow(
     .join('\n');
 }
 
+/**
+ * 按创建顺序取某一类洞察：先比 createdAt，同毫秒按数组写入顺序。
+ * 提示词里的 C/D 编号与 Runner 的 ref 映射必须使用同一顺序，否则引用会错位。
+ */
+export function insightsInCreatedOrder(
+  insights: readonly Insight[],
+  kind: Insight['kind']
+): Insight[] {
+  return insights
+    .map((insight, index) => ({ insight, index }))
+    .filter(({ insight }) => insight.kind === kind)
+    .sort(
+      (left, right) =>
+        left.insight.createdAt.localeCompare(right.insight.createdAt) ||
+        left.index - right.index
+    )
+    .map(({ insight }) => insight);
+}
+
 export function formatInsightsForPrompt(
   insights: readonly Insight[],
   participants: readonly Participant[]
@@ -65,15 +84,7 @@ export function formatInsightsForPrompt(
     participants.map((participant) => [participant.id, participant])
   );
   const createdOrder = (kind: Insight['kind']) =>
-    insights
-      .map((insight, index) => ({ insight, index }))
-      .filter(({ insight }) => insight.kind === kind)
-      .sort(
-        (left, right) =>
-          left.insight.createdAt.localeCompare(right.insight.createdAt) ||
-          left.index - right.index
-      )
-      .map(({ insight }) => insight);
+    insightsInCreatedOrder(insights, kind);
   const lines: string[] = [];
 
   createdOrder('consensus').forEach((insight, index) => {

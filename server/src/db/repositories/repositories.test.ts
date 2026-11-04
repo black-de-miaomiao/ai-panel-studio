@@ -146,6 +146,22 @@ describe('discussion repository', () => {
     expect(getById(database, '00000000-0000-4000-8000-000000000999')).toBeNull();
   });
 
+  it('uses an injected id generator when creating a discussion', () => {
+    const fixedId = '00000000-0000-4000-8000-0000000000e2';
+    const created = createDiscussion(
+      database,
+      {
+        topic: '固定 ID 的讨论',
+        expertCount: 2,
+        maxTurns: 12
+      },
+      () => fixedId
+    );
+
+    expect(created.id).toBe(fixedId);
+    expect(getById(database, fixedId)?.topic).toBe('固定 ID 的讨论');
+  });
+
   it('sorts by status and updatedAt, filters statuses, and maps list aggregates', () => {
     const live = createDiscussion(database, {
       topic: '直播中讨论',
@@ -430,6 +446,53 @@ describe('insight repository', () => {
       'Insight stance participant is outside the discussion'
     );
     expect(listInsightsByDiscussion(database, firstSeedId)).toEqual([insight]);
+  });
+
+  it('returns stances in seat order and keeps insertion order for equal createdAt', () => {
+    const discussionId = createDiscussion(database, {
+      topic: '洞察排序讨论',
+      expertCount: 2,
+      maxTurns: 12
+    }).id;
+    // 专家 ID 故意与座位顺序相反，验证读取顺序不受随机 UUID 影响。
+    const seatTwoId = '00000000-0000-4000-8000-0000000000a2';
+    const seatOneId = '00000000-0000-4000-8000-0000000000a1';
+    replaceLineup(database, discussionId, [
+      makeDraft('00000000-0000-4000-8000-0000000000a0', 'host', 0, '主持人', '#E8C872'),
+      makeDraft(seatOneId, 'expert', 1, '嘉宾一', '#5B9DFF'),
+      makeDraft(seatTwoId, 'expert', 2, '嘉宾二', '#FF6B9A')
+    ]);
+    const sameCreatedAt = '2026-05-01T09:00:00.000Z';
+    const make = (id: string, content: string, participantIds: readonly string[]): Insight => ({
+      id,
+      discussionId,
+      kind: 'divergence',
+      content,
+      status: 'active',
+      stances: participantIds.map((participantId) => ({
+        participantId,
+        position: '各有侧重'
+      })),
+      evidenceSeqs: [1],
+      updatedAtSeq: 1,
+      createdAt: sameCreatedAt,
+      updatedAt: sameCreatedAt
+    });
+
+    replaceAll(database, discussionId, [
+      make('00000000-0000-4000-8000-0000000000b1', '先写入的分歧', [seatTwoId, seatOneId]),
+      make('00000000-0000-4000-8000-0000000000b2', '后写入的分歧', [seatOneId, seatTwoId])
+    ]);
+
+    const stored = listInsightsByDiscussion(database, discussionId);
+    expect(stored.map((item) => item.content)).toEqual([
+      '先写入的分歧',
+      '后写入的分歧'
+    ]);
+    expect(stored[0]?.stances.map((stance) => stance.participantId)).toEqual([
+      seatOneId,
+      seatTwoId
+    ]);
   });
 });
 

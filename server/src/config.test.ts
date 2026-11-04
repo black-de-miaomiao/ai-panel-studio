@@ -19,8 +19,17 @@ describe('loadConfig', () => {
       maxTurns: 16,
       pacingMs: 800,
       mockLatencyMs: 400,
-      mockStreamDelayMs: 30
+      mockStreamDelayMs: 30,
+      testDiscussionIdSeed: null
     });
+  });
+
+  it('reads the test-only discussion id seed and treats empty as unset', () => {
+    expect(loadConfig({}).testDiscussionIdSeed).toBeNull();
+    expect(loadConfig({ TEST_DISCUSSION_ID_SEED: '' }).testDiscussionIdSeed).toBeNull();
+    expect(
+      loadConfig({ TEST_DISCUSSION_ID_SEED: 'e2e-fixed' }).testDiscussionIdSeed
+    ).toBe('e2e-fixed');
   });
 
   it('selects deepseek when an API key is supplied without an explicit provider', () => {

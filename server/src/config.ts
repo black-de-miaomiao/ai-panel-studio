@@ -9,6 +9,12 @@ const providerSchema = z.preprocess(
   z.enum(['deepseek', 'mock']).optional()
 );
 
+// 仅供测试：设置后新建讨论使用由种子派生的稳定 ID，整场讨论因此可复现。
+const testSeedSchema = z.preprocess(
+  (value) => (value === '' ? undefined : value),
+  z.string().min(1).optional()
+);
+
 const envSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
   DATABASE_PATH: z.string().default('./data/panel.db'),
@@ -21,7 +27,8 @@ const envSchema = z.object({
   MAX_TURNS: z.coerce.number().int().min(1).default(16),
   PACING_MS: z.coerce.number().int().min(0).default(800),
   MOCK_LATENCY_MS: z.coerce.number().int().min(0).default(400),
-  MOCK_STREAM_DELAY_MS: z.coerce.number().int().min(0).default(30)
+  MOCK_STREAM_DELAY_MS: z.coerce.number().int().min(0).default(30),
+  TEST_DISCUSSION_ID_SEED: testSeedSchema
 });
 
 export type LlmProvider = 'deepseek' | 'mock';
@@ -41,6 +48,8 @@ export interface AppConfig {
   pacingMs: number;
   mockLatencyMs: number;
   mockStreamDelayMs: number;
+  /** 仅供测试：固定讨论 ID 的种子；不设置为 null，行为与线上一致。 */
+  testDiscussionIdSeed: string | null;
 }
 
 export function loadDotEnv(): void {
@@ -69,7 +78,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxTurns: parsed.MAX_TURNS,
     pacingMs: parsed.PACING_MS,
     mockLatencyMs: parsed.MOCK_LATENCY_MS,
-    mockStreamDelayMs: parsed.MOCK_STREAM_DELAY_MS
+    mockStreamDelayMs: parsed.MOCK_STREAM_DELAY_MS,
+    testDiscussionIdSeed: parsed.TEST_DISCUSSION_ID_SEED ?? null
   };
 }
 
@@ -88,6 +98,7 @@ export function describeConfig(config: AppConfig) {
     maxTurns: config.maxTurns,
     pacingMs: config.pacingMs,
     mockLatencyMs: config.mockLatencyMs,
-    mockStreamDelayMs: config.mockStreamDelayMs
+    mockStreamDelayMs: config.mockStreamDelayMs,
+    testDiscussionIdSeed: config.testDiscussionIdSeed
   };
 }

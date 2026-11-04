@@ -34,6 +34,7 @@ export function createTestConfig(
     pacingMs: 0,
     mockLatencyMs: 0,
     mockStreamDelayMs: 0,
+    testDiscussionIdSeed: null,
     ...otherOverrides
   };
 }

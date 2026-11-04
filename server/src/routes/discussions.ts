@@ -8,6 +8,7 @@ import {
 } from '@aps/shared';
 import { z } from 'zod';
 import { normalizeLineup, LineupValidationError } from '../core/lineup';
+import { createDiscussionIdFactory } from '../core/deterministicIds';
 import { LLMFormatError, parseJsonLoose } from '../core/json';
 import { withTransaction } from '../db/connection';
 import {
@@ -263,6 +264,10 @@ export function createDiscussionsRouter(
 ): Router {
   const router = Router();
   const lineupGenerating = new Set<string>();
+  // 仅供测试：设置种子后新建讨论使用可复现的 ID（见 core/deterministicIds）。
+  const discussionIdFactory = deps.config.testDiscussionIdSeed
+    ? createDiscussionIdFactory(deps.config.testDiscussionIdSeed)
+    : null;
 
   const sendLineupWriteFailure = (
     response: Response,
@@ -325,11 +330,17 @@ export function createDiscussionsRouter(
       return;
     }
 
-    const discussion = createDiscussion(deps.db, {
-      topic: parsed.data.topic,
-      expertCount: parsed.data.expertCount,
-      maxTurns: deps.config.maxTurns
-    });
+    const discussion = createDiscussion(
+      deps.db,
+      {
+        topic: parsed.data.topic,
+        expertCount: parsed.data.expertCount,
+        maxTurns: deps.config.maxTurns
+      },
+      discussionIdFactory
+        ? () => discussionIdFactory(parsed.data.topic)
+        : undefined
+    );
     lineupGenerating.add(discussion.id);
     try {
       let lineup: ReturnType<typeof normalizeLineup>;
