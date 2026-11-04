@@ -3,7 +3,7 @@
 用户提出需求并做关键决定；Factory Droid 主代理作为编排者拆分阶段、撰写 Prompt、审查产出并分层提交；luna-worker 子代理按各阶段范围执行。各阶段完整 Prompt 原文保存在 [`docs/prompts/`](prompts/)；本文摘录核心目标与约束，并记录日志中真实发生的修正。
 
 | 序号 | 范式标签 | Prompt 文件 | 执行者 | 对应提交 |
-|---:|---|---|---|---|
+|---|---|---|---|---|
 | 01 | 【SDD 阶段】 | [01-sdd-docs.md](prompts/01-sdd-docs.md) | luna-worker 子代理（配置为 GPT-6 Luna） | `512e60e` docs(sdd): 产品需求、数据模型、API/SSE 契约与架构规格 |
 | 01b | 【SDD 阶段】 | [01b-sdd-review-fixes.md](prompts/01b-sdd-review-fixes.md) | luna-worker 子代理（配置为 GPT-6 Luna） | `512e60e` docs(sdd): 产品需求、数据模型、API/SSE 契约与架构规格 |
 | 02 | 【SDD 阶段】 | [02-scaffold.md](prompts/02-scaffold.md) | luna-worker 子代理（配置为 GPT-6 Luna） | `027a769` chore(scaffold): npm workspaces 单仓（shared / server / web）与工具链 |
